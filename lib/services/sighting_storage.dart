@@ -35,6 +35,11 @@ class SightingStorage {
   static Future<void> save(Sighting sighting) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList(_key) ?? [];
+    // Remove existing entry for this id (for updates)
+    raw.removeWhere((s) {
+      final map = jsonDecode(s) as Map<String, dynamic>;
+      return map['id'] == sighting.id;
+    });
     raw.add(jsonEncode(sighting.toJson()));
     await prefs.setStringList(_key, raw);
   }
@@ -48,7 +53,7 @@ class SightingStorage {
     });
     await prefs.setStringList(_key, raw);
 
-    // Delete files
+    // Delete local files
     final base = await _sightingsDir();
     final dir = Directory('${base.path}/$id');
     if (await dir.exists()) await dir.delete(recursive: true);

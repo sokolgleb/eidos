@@ -28,6 +28,9 @@ dependencies:
   share_plus: ^10.0.0
   gal: ^2.3.0
 
+  # Backend
+  supabase_flutter: ^2.8.4
+
   cupertino_icons: ^1.0.8
 
 dev_dependencies:

@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart';
 import '../models/sighting.dart';
 import '../models/stroke.dart';
 import '../services/sighting_storage.dart';
+import '../services/cloud_service.dart';
 import '../widgets/drawing_canvas.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -188,12 +189,22 @@ class _EditorScreenState extends State<EditorScreen> {
           createdAt: DateTime.now(),
           originalPath: originalPath,
           annotatedPath: annotatedPath,
+          syncStatus: SyncStatus.local,
         );
         await SightingStorage.save(sighting);
         if (mounted) Navigator.pop(context, sighting);
+        // Upload to cloud in background (don't await)
+        _uploadInBackground(sighting);
       }
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _uploadInBackground(Sighting sighting) async {
+    final synced = await CloudService.uploadSighting(sighting);
+    if (synced != null) {
+      await SightingStorage.save(synced);
     }
   }
 

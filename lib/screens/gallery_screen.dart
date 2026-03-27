@@ -5,6 +5,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:gal/gal.dart';
 import '../models/sighting.dart';
 import '../services/sighting_storage.dart';
+import '../services/cloud_service.dart';
 import 'editor_screen.dart';
 
 // Persists the locked-original mode across navigation
@@ -46,6 +47,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
   void initState() {
     super.initState();
     _load();
+    CloudService.ensureSignedIn(); // fire and forget
   }
 
   Future<void> _load() async {
@@ -254,6 +256,20 @@ class _SightingTileState extends State<_SightingTile> {
                         style: TextStyle(color: Colors.white, fontSize: 11)),
                   ),
                 ),
+              // Sync status badge
+              if (widget.sighting.syncStatus != SyncStatus.synced)
+                Positioned(
+                  bottom: 6, right: 6,
+                  child: Icon(
+                    widget.sighting.syncStatus == SyncStatus.uploading
+                        ? Icons.cloud_sync_outlined
+                        : widget.sighting.syncStatus == SyncStatus.failed
+                            ? Icons.cloud_off_outlined
+                            : Icons.cloud_upload_outlined,
+                    color: Colors.white.withAlpha(160),
+                    size: 14,
+                  ),
+                ),
             ],
           ),
         ),
@@ -285,8 +301,6 @@ class _DetailScreenState extends State<_DetailScreen> {
   bool _lockedOriginal = _globalLockedOriginal;
 
   final Map<String, int> _versions = {};
-
-  bool get _showingOriginal => _lockedOriginal ? !_pressing : _pressing;
 
   Sighting get _current => widget.sightings[_currentIndex];
 
