@@ -10,6 +10,24 @@ import 'editor_screen.dart';
 // Persists the locked-original mode across navigation
 bool _globalLockedOriginal = false;
 
+// Fade + scale-up route (modal feel, no slide)
+Route<T> _fadeScaleRoute<T>(Widget page) => PageRouteBuilder<T>(
+      pageBuilder: (_, __, ___) => page,
+      transitionDuration: const Duration(milliseconds: 300),
+      reverseTransitionDuration: const Duration(milliseconds: 220),
+      transitionsBuilder: (_, animation, __, child) {
+        return FadeTransition(
+          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.93, end: 1.0).animate(
+              CurvedAnimation(parent: animation, curve: Curves.easeOut),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+
 class GalleryScreen extends StatefulWidget {
   const GalleryScreen({super.key});
 
@@ -21,8 +39,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
   List<Sighting> _sightings = [];
   bool _loading = true;
 
-  // Smooth pinch-to-zoom: tile size in logical pixels
-  double? _tileSize;      // null until first build (initialized from screen width)
+  double? _tileSize;
   double _baseTileSize = 0;
 
   @override
@@ -43,7 +60,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
     if (!mounted) return;
     final result = await Navigator.push<Sighting>(
       context,
-      MaterialPageRoute(builder: (_) => EditorScreen(imagePath: file.path)),
+      _fadeScaleRoute(EditorScreen(imagePath: file.path)),
     );
     if (result != null) _load();
   }
@@ -51,12 +68,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
   void _openDetail(int index) {
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => _DetailScreen(
-          sightings: _sightings,
-          initialIndex: index,
-        ),
-      ),
+      _fadeScaleRoute(_DetailScreen(
+        sightings: _sightings,
+        initialIndex: index,
+      )),
     );
   }
 
@@ -110,7 +125,6 @@ class _GalleryScreenState extends State<GalleryScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ── Header ──
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               child: Row(
@@ -130,7 +144,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
                     child: Container(
                       width: 40, height: 40,
                       decoration: BoxDecoration(
-                        border: Border.all(color: Colors.white.withAlpha(60)),
+                        color: Colors.white.withAlpha(20),
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: const Icon(Icons.add, color: Colors.white, size: 22),
@@ -139,17 +153,13 @@ class _GalleryScreenState extends State<GalleryScreen> {
                 ],
               ),
             ),
-
-            // ── Grid ──
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator(color: Colors.white38))
                   : _sightings.isEmpty
                       ? _EmptyState(onAdd: _showPickerSheet)
                       : GestureDetector(
-                          onScaleStart: (_) {
-                            _baseTileSize = _tileSize!;
-                          },
+                          onScaleStart: (_) { _baseTileSize = _tileSize!; },
                           onScaleUpdate: (details) {
                             if (details.scale == 1.0) return;
                             final next = (_baseTileSize * details.scale)
@@ -185,7 +195,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
   }
 }
 
-// ─── Tile ────────────────────────────────────────────────────────────────────
+// ─── Tile ─────────────────────────────────────────────────────────────────────
 
 class _SightingTile extends StatefulWidget {
   final Sighting sighting;
@@ -253,7 +263,6 @@ class _SightingTileState extends State<_SightingTile> {
 }
 
 // ─── Detail screen ────────────────────────────────────────────────────────────
-// Buttons live here (fixed overlay). PageView only scrolls images.
 
 class _DetailScreen extends StatefulWidget {
   final List<Sighting> sightings;
@@ -272,11 +281,9 @@ class _DetailScreenState extends State<_DetailScreen> {
   late final PageController _pageController;
   late int _currentIndex;
 
-  // Hold-to-reveal state
   bool _pressing = false;
-  bool _lockedOriginal = _globalLockedOriginal; // persisted across navigation
+  bool _lockedOriginal = _globalLockedOriginal;
 
-  // Per-sighting version counter for cache busting after edit
   final Map<String, int> _versions = {};
 
   bool get _showingOriginal => _lockedOriginal ? !_pressing : _pressing;
@@ -307,12 +314,10 @@ class _DetailScreenState extends State<_DetailScreen> {
     final sighting = _current;
     final result = await Navigator.push<Sighting>(
       context,
-      MaterialPageRoute(
-        builder: (_) => EditorScreen(
-          imagePath: sighting.annotatedPath,
-          sightingToUpdate: sighting,
-        ),
-      ),
+      _fadeScaleRoute(EditorScreen(
+        imagePath: sighting.annotatedPath,
+        sightingToUpdate: sighting,
+      )),
     );
     if (result != null && mounted) {
       PaintingBinding.instance.imageCache
@@ -352,11 +357,50 @@ class _DetailScreenState extends State<_DetailScreen> {
     await Share.shareXFiles([XFile(_current.annotatedPath)]);
   }
 
+  void _showMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined, color: Colors.white),
+              title: const Text('Edit', style: TextStyle(color: Colors.white)),
+              onTap: () { Navigator.pop(context); _openEditor(); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.download_outlined, color: Colors.white),
+              title: const Text('Save to gallery', style: TextStyle(color: Colors.white)),
+              onTap: () { Navigator.pop(context); _saveToGallery(); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.ios_share_outlined, color: Colors.white),
+              title: const Text('Share', style: TextStyle(color: Colors.white)),
+              onTap: () { Navigator.pop(context); _share(); },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final sighting = _current;
-
-    // Button label for hold-to-reveal
     String revealLabel;
     if (_lockedOriginal) {
       revealLabel = _pressing ? 'annotated' : 'original ●';
@@ -366,112 +410,94 @@ class _DetailScreenState extends State<_DetailScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // ── PageView: only images scroll ──
-          PageView.builder(
-            controller: _pageController,
-            itemCount: widget.sightings.length,
-            onPageChanged: _onPageChanged,
-            itemBuilder: (context, i) => _DetailPage(
-              sighting: widget.sightings[i],
-              showOriginal: _lockedOriginal
-                  ? (i == _currentIndex ? !_pressing : true)
-                  : (i == _currentIndex ? _pressing : false),
-              version: _versions[widget.sightings[i].id] ?? 0,
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onVerticalDragEnd: (details) {
+          if ((details.primaryVelocity ?? 0) > 500) {
+            Navigator.pop(context);
+          }
+        },
+        child: Stack(
+          children: [
+            // ── Images only ──
+            PageView.builder(
+              controller: _pageController,
+              itemCount: widget.sightings.length,
+              onPageChanged: _onPageChanged,
+              itemBuilder: (context, i) => _DetailPage(
+                sighting: widget.sightings[i],
+                showOriginal: _lockedOriginal
+                    ? (i == _currentIndex ? !_pressing : true)
+                    : (i == _currentIndex ? _pressing : false),
+                version: _versions[widget.sightings[i].id] ?? 0,
+              ),
             ),
-          ),
 
-          // ── Top gradient ──
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: IgnorePointer(
-              child: Container(
-                height: 120,
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Color(0xCC000000), Colors.transparent],
+            // ── Top gradient ──
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: IgnorePointer(
+                child: Container(
+                  height: 120,
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xCC000000), Colors.transparent],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
 
-          // ── Bottom gradient ──
-          Positioned(
-            bottom: 0, left: 0, right: 0,
-            child: IgnorePointer(
-              child: Container(
-                height: 160,
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.bottomCenter,
-                    end: Alignment.topCenter,
-                    colors: [Color(0xCC000000), Colors.transparent],
+            // ── Bottom gradient ──
+            Positioned(
+              bottom: 0, left: 0, right: 0,
+              child: IgnorePointer(
+                child: Container(
+                  height: 160,
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Color(0xCC000000), Colors.transparent],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
 
-          // ── Top bar (fixed) ──
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: Container(
-                        width: 44, height: 44,
-                        decoration: BoxDecoration(
-                          color: Colors.black.withAlpha(120),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(Icons.arrow_back, color: Colors.white),
+            // ── Top bar: back (left) + menu (right) ──
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
+                    children: [
+                      _OverlayBtn(
+                        icon: Icons.arrow_back,
+                        onTap: () => Navigator.pop(context),
                       ),
-                    ),
-                    const Spacer(),
-                    if (widget.sightings.length > 1)
-                      Text(
-                        '${_currentIndex + 1} / ${widget.sightings.length}',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(150),
-                          fontSize: 13,
-                        ),
+                      const Spacer(),
+                      _OverlayBtn(
+                        icon: Icons.more_horiz,
+                        onTap: _showMenu,
                       ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
 
-          // ── Bottom bar (fixed) ──
-          Positioned(
-            bottom: 0, left: 0, right: 0,
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Left: edit / save / share
-                    Row(
-                      children: [
-                        _IconBtn(icon: Icons.edit_outlined, onTap: _openEditor),
-                        const SizedBox(width: 8),
-                        _IconBtn(icon: Icons.download_outlined, onTap: _saveToGallery),
-                        const SizedBox(width: 8),
-                        _IconBtn(icon: Icons.ios_share_outlined, onTap: _share),
-                      ],
-                    ),
-
-                    // Right: hold-to-reveal / double-tap to lock
-                    GestureDetector(
+            // ── Bottom: hold-to-reveal centered ──
+            Positioned(
+              bottom: 0, left: 0, right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 28),
+                  child: Center(
+                    child: GestureDetector(
                       onDoubleTap: () => setState(() {
                         _lockedOriginal = !_lockedOriginal;
                         _globalLockedOriginal = _lockedOriginal;
@@ -484,36 +510,33 @@ class _DetailScreenState extends State<_DetailScreen> {
                         });
                       },
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 12),
                         decoration: BoxDecoration(
                           color: _lockedOriginal
                               ? Colors.white.withAlpha(50)
                               : Colors.white.withAlpha(30),
                           borderRadius: BorderRadius.circular(24),
-                          border: Border.all(
-                            color: _lockedOriginal
-                                ? Colors.white.withAlpha(140)
-                                : Colors.white.withAlpha(80),
-                          ),
                         ),
                         child: Text(
                           revealLabel,
-                          style: const TextStyle(color: Colors.white, fontSize: 15),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 15),
                         ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
-// ─── Single page: only images, no controls ───────────────────────────────────
+// ─── Single page: only images ─────────────────────────────────────────────────
 
 class _DetailPage extends StatelessWidget {
   final Sighting sighting;
@@ -554,13 +577,13 @@ class _DetailPage extends StatelessWidget {
   }
 }
 
-// ─── Shared icon button ───────────────────────────────────────────────────────
+// ─── Overlay button (back / menu) ─────────────────────────────────────────────
 
-class _IconBtn extends StatelessWidget {
+class _OverlayBtn extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
 
-  const _IconBtn({required this.icon, required this.onTap});
+  const _OverlayBtn({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -569,16 +592,16 @@ class _IconBtn extends StatelessWidget {
       child: Container(
         width: 44, height: 44,
         decoration: BoxDecoration(
-          color: Colors.white.withAlpha(25),
+          color: Colors.black.withAlpha(120),
           borderRadius: BorderRadius.circular(12),
         ),
-        child: Icon(icon, color: Colors.white, size: 20),
+        child: Icon(icon, color: Colors.white, size: 22),
       ),
     );
   }
 }
 
-// ─── Empty state ─────────────────────────────────────────────────────────────
+// ─── Empty state ──────────────────────────────────────────────────────────────
 
 class _EmptyState extends StatelessWidget {
   final VoidCallback onAdd;
