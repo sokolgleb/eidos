@@ -295,30 +295,54 @@ class _EditorScreenState extends State<EditorScreen> {
             child: SafeArea(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _IconBtn(
-                      icon: Icons.brush,
-                      active: _showBrushSettings,
-                      iconColor: _brushColor,
-                      onTap: () =>
-                          setState(() => _showBrushSettings = !_showBrushSettings),
-                    ),
-                    _saving
-                        ? const SizedBox(
-                            width: 44, height: 44,
-                            child: Center(
-                              child: SizedBox(
-                                width: 22, height: 22,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white),
+                child: _showBrushSettings
+                    // ── Brush settings open: single OK button centred ──
+                    ? Center(
+                        child: GestureDetector(
+                          onTap: () => setState(() => _showBrushSettings = false),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 32, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withAlpha(25),
+                              borderRadius: BorderRadius.circular(24),
+                            ),
+                            child: const Text(
+                              'OK',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
-                          )
-                        : _IconBtn(icon: Icons.check, onTap: _save),
-                  ],
-                ),
+                          ),
+                        ),
+                      )
+                    // ── Normal: brush button + save/spinner ──
+                    : Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          _IconBtn(
+                            icon: Icons.brush,
+                            active: _showBrushSettings,
+                            iconColor: _brushColor,
+                            onTap: () => setState(
+                                () => _showBrushSettings = !_showBrushSettings),
+                          ),
+                          _saving
+                              ? const SizedBox(
+                                  width: 44, height: 44,
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 22, height: 22,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2, color: Colors.white),
+                                    ),
+                                  ),
+                                )
+                              : _IconBtn(icon: Icons.check, onTap: _save),
+                        ],
+                      ),
               ),
             ),
           ),
