@@ -46,13 +46,55 @@ class _GalleryScreenState extends State<GalleryScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
-    CloudService.ensureSignedIn(); // fire and forget
+    _loadThenSync();
+  }
+
+  Future<void> _loadThenSync() async {
+    await _load();
+    _syncUnsynced();
   }
 
   Future<void> _load() async {
     final list = await SightingStorage.loadAll();
     if (mounted) setState(() { _sightings = list; _loading = false; });
+  }
+
+  /// Upload any locally-only sightings to the cloud in the background.
+  /// Updates the tile icon as each one finishes.
+  Future<void> _syncUnsynced() async {
+    await CloudService.ensureSignedIn();
+    final unsynced = _sightings
+        .where((s) =>
+            s.syncStatus != SyncStatus.synced && s.originalPath.isNotEmpty)
+        .toList();
+    if (unsynced.isEmpty) return;
+
+    for (final sighting in unsynced) {
+      // Mark as uploading in UI
+      if (mounted) {
+        setState(() {
+          final i = _sightings.indexWhere((s) => s.id == sighting.id);
+          if (i >= 0) {
+            _sightings[i] = sighting.copyWith(syncStatus: SyncStatus.uploading);
+          }
+        });
+      }
+
+      final synced = await CloudService.uploadSighting(sighting);
+
+      if (mounted) {
+        setState(() {
+          final i = _sightings.indexWhere((s) => s.id == sighting.id);
+          if (i >= 0) {
+            _sightings[i] = synced ??
+                sighting.copyWith(syncStatus: SyncStatus.failed);
+          }
+        });
+      }
+      if (synced != null) {
+        await SightingStorage.save(synced);
+      }
+    }
   }
 
   Future<void> _pickAndEdit(ImageSource source) async {
@@ -68,13 +110,15 @@ class _GalleryScreenState extends State<GalleryScreen> {
   }
 
   void _openDetail(int index) {
-    Navigator.push(
+    Navigator.push<bool>(
       context,
       _fadeScaleRoute(_DetailScreen(
         sightings: _sightings,
         initialIndex: index,
       )),
-    );
+    ).then((deleted) {
+      if (deleted == true) _load();
+    });
   }
 
   void _showPickerSheet() {
@@ -260,15 +304,21 @@ class _SightingTileState extends State<_SightingTile> {
               if (widget.sighting.syncStatus != SyncStatus.synced)
                 Positioned(
                   bottom: 6, right: 6,
-                  child: Icon(
-                    widget.sighting.syncStatus == SyncStatus.uploading
-                        ? Icons.cloud_sync_outlined
-                        : widget.sighting.syncStatus == SyncStatus.failed
-                            ? Icons.cloud_off_outlined
-                            : Icons.cloud_upload_outlined,
-                    color: Colors.white.withAlpha(160),
-                    size: 14,
-                  ),
+                  child: widget.sighting.syncStatus == SyncStatus.uploading
+                      ? const SizedBox(
+                          width: 12, height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: Colors.white70,
+                          ),
+                        )
+                      : Icon(
+                          widget.sighting.syncStatus == SyncStatus.failed
+                              ? Icons.cloud_off_outlined
+                              : Icons.cloud_upload_outlined,
+                          color: Colors.white.withAlpha(160),
+                          size: 14,
+                        ),
                 ),
             ],
           ),
@@ -309,6 +359,19 @@ class _DetailScreenState extends State<_DetailScreen> {
     super.initState();
     _currentIndex = widget.initialIndex;
     _pageController = PageController(initialPage: widget.initialIndex);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _precache(_currentIndex));
+  }
+
+  /// Loads original images for the current page ± 2 into Flutter's image cache
+  /// so swiping shows them instantly without a black flash.
+  void _precache(int center) {
+    for (int offset = -2; offset <= 2; offset++) {
+      final i = center + offset;
+      if (i >= 0 && i < widget.sightings.length && mounted) {
+        precacheImage(
+          FileImage(File(widget.sightings[i].originalPath)), context);
+      }
+    }
   }
 
   @override
@@ -322,6 +385,7 @@ class _DetailScreenState extends State<_DetailScreen> {
       _currentIndex = i;
       _pressing = false;
     });
+    _precache(i);
   }
 
   Future<void> _openEditor() async {
@@ -371,6 +435,36 @@ class _DetailScreenState extends State<_DetailScreen> {
     await Share.shareXFiles([XFile(_current.annotatedPath)]);
   }
 
+  Future<void> _deleteSighting() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Delete sighting?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text('This cannot be undone.',
+            style: TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete',
+                style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final sighting = _current;
+    await SightingStorage.delete(sighting.id);
+    CloudService.deleteSighting(sighting.id); // fire and forget
+    if (mounted) Navigator.pop(context, true); // true = deleted, triggers gallery reload
+  }
+
   void _showMenu() {
     showModalBottomSheet(
       context: context,
@@ -406,6 +500,12 @@ class _DetailScreenState extends State<_DetailScreen> {
               title: const Text('Share', style: TextStyle(color: Colors.white)),
               onTap: () { Navigator.pop(context); _share(); },
             ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              title: const Text('Delete',
+                  style: TextStyle(color: Colors.redAccent)),
+              onTap: () { Navigator.pop(context); _deleteSighting(); },
+            ),
             const SizedBox(height: 8),
           ],
         ),
@@ -439,6 +539,7 @@ class _DetailScreenState extends State<_DetailScreen> {
               itemCount: widget.sightings.length,
               onPageChanged: _onPageChanged,
               itemBuilder: (context, i) => _DetailPage(
+                key: ValueKey(widget.sightings[i].id),
                 sighting: widget.sightings[i],
                 showOriginal: _lockedOriginal
                     ? (i == _currentIndex ? !_pressing : true)
@@ -558,6 +659,7 @@ class _DetailPage extends StatelessWidget {
   final int version;
 
   const _DetailPage({
+    required super.key,
     required this.sighting,
     required this.showOriginal,
     required this.version,

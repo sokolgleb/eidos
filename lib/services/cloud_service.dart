@@ -62,6 +62,14 @@ class CloudService {
     }
   }
 
+  /// Deletes a sighting from Supabase DB (local files removed separately).
+  static Future<void> deleteSighting(String id) async {
+    try {
+      await ensureSignedIn();
+      await _db.from('sightings').delete().eq('id', id);
+    } catch (_) {}
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   static Future<Map<String, String>?> _presignedPut(

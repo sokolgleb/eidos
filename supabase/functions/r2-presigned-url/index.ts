@@ -6,6 +6,7 @@ const R2_ACCESS_KEY_ID = Deno.env.get('R2_ACCESS_KEY_ID')!
 const R2_SECRET_ACCESS_KEY = Deno.env.get('R2_SECRET_ACCESS_KEY')!
 const R2_BUCKET = 'eidos-images'
 const R2_HOST = `${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
+const R2_PUBLIC_BASE = 'https://pub-9682c785f96b466a80a82b94f48c0765.r2.dev'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -123,7 +124,7 @@ serve(async (req) => {
     const objectKey = `${user.id}/${sightingId}/${fileType}.${ext}`
 
     const uploadUrl = await presignedPut(objectKey)
-    const publicUrl = `https://${R2_HOST}/${R2_BUCKET}/${objectKey}`
+    const publicUrl = `${R2_PUBLIC_BASE}/${objectKey}`
 
     return new Response(JSON.stringify({ uploadUrl, publicUrl, objectKey }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

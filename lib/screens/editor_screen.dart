@@ -31,6 +31,8 @@ class _EditorScreenState extends State<EditorScreen> {
   // Zoom & mode
   final _transformController = TransformationController();
   bool _isDrawMode = true;
+  Matrix4? _scaleStartMatrix; // captured when pinch starts
+  double _scaleAtPinchStart = 1.0; // d.scale value when we detected 2 fingers
 
   // Brush
   Color _brushColor = Colors.white;
@@ -94,8 +96,9 @@ class _EditorScreenState extends State<EditorScreen> {
     super.dispose();
   }
 
-  // ── Pan gesture handlers (outside InteractiveViewer, coords converted via toScene) ──
-  // GestureDetector.onPan* won't fire on button taps — no conflict with UI controls.
+  // ── Gesture handlers ──────────────────────────────────────────────────────
+  // onScale* handles both drawing (1 finger) and pinch-to-zoom (2 fingers).
+  // In navigate mode, InteractiveViewer takes over (no GestureDetector overlay).
 
   Offset? _clampToImage(Offset scenePt) {
     final rect = _imageRect();
@@ -104,46 +107,77 @@ class _EditorScreenState extends State<EditorScreen> {
     return scenePt;
   }
 
-  void _onPanStart(DragStartDetails d) {
-    final pt = _clampToImage(_transformController.toScene(d.localPosition));
-    if (pt == null) return;
-    setState(() {
-      _currentStroke = Stroke(
-        points: [pt],
-        color: _brushColor,
-        size: _brushSize,
-        thinning: 1.0,
-        smoothing: 1.0,
-      );
-    });
+  void _onScaleStart(ScaleStartDetails d) {
+    if (d.pointerCount == 1) {
+      final pt = _clampToImage(_transformController.toScene(d.localFocalPoint));
+      if (pt == null) return;
+      setState(() {
+        _currentStroke = Stroke(
+          points: [pt],
+          color: _brushColor,
+          size: _brushSize,
+          thinning: 1.0,
+          smoothing: 1.0,
+        );
+      });
+    } else {
+      // Started directly with 2 fingers
+      _scaleStartMatrix = _transformController.value.clone();
+      _scaleAtPinchStart = 1.0;
+    }
   }
 
-  void _onPanUpdate(DragUpdateDetails d) {
-    if (_currentStroke == null) return;
-    final raw = _transformController.toScene(d.localPosition);
-    final rect = _imageRect();
-    // Clamp to image bounds so stroke doesn't go outside
-    final pt = rect != null
-        ? Offset(raw.dx.clamp(rect.left, rect.right),
-                 raw.dy.clamp(rect.top, rect.bottom))
-        : raw;
-    setState(() {
-      _currentStroke = _currentStroke!.copyWith(
-        points: [..._currentStroke!.points, pt],
-      );
-    });
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    if (d.pointerCount >= 2) {
+      // Discard any in-progress stroke — don't commit it
+      if (_currentStroke != null) {
+        setState(() => _currentStroke = null);
+      }
+      // Lazily init pinch baseline when transitioning from 1→2 fingers
+      if (_scaleStartMatrix == null) {
+        _scaleStartMatrix = _transformController.value.clone();
+        _scaleAtPinchStart = d.scale;
+        return;
+      }
+      // Zoom around focal point; d.scale is cumulative from gesture start,
+      // so use it relative to _scaleAtPinchStart.
+      final relativeScale = d.scale / _scaleAtPinchStart;
+      final focal = d.localFocalPoint;
+      final baseScale = _scaleStartMatrix!.getMaxScaleOnAxis();
+      final newScale = (baseScale * relativeScale).clamp(0.8, 6.0);
+      final s = newScale / baseScale;
+      final m = Matrix4.identity()
+        ..translate(focal.dx, focal.dy)
+        ..scale(s)
+        ..translate(-focal.dx, -focal.dy)
+        ..multiply(_scaleStartMatrix!);
+      setState(() => _transformController.value = m);
+    } else if (d.pointerCount == 1 && _currentStroke != null) {
+      final raw = _transformController.toScene(d.localFocalPoint);
+      final rect = _imageRect();
+      final pt = rect != null
+          ? Offset(raw.dx.clamp(rect.left, rect.right),
+                   raw.dy.clamp(rect.top, rect.bottom))
+          : raw;
+      setState(() {
+        _currentStroke = _currentStroke!.copyWith(
+          points: [..._currentStroke!.points, pt],
+        );
+      });
+    }
   }
 
-  void _onPanEnd(DragEndDetails d) {
-    if (_currentStroke == null) return;
-    setState(() {
-      _strokes.add(_currentStroke!);
-      _currentStroke = null;
-    });
-  }
-
-  void _onPanCancel() {
-    setState(() => _currentStroke = null);
+  void _onScaleEnd(ScaleEndDetails d) {
+    // Only commit the stroke if it ended as a 1-finger gesture.
+    // 2-finger gestures already cleared _currentStroke in onScaleUpdate.
+    if (_currentStroke != null) {
+      setState(() {
+        _strokes.add(_currentStroke!);
+        _currentStroke = null;
+      });
+    }
+    _scaleStartMatrix = null;
+    _scaleAtPinchStart = 1.0;
   }
 
   void _undo() {
@@ -219,7 +253,7 @@ class _EditorScreenState extends State<EditorScreen> {
             child: InteractiveViewer(
               transformationController: _transformController,
               panEnabled: !_isDrawMode,
-              scaleEnabled: true,
+              scaleEnabled: !_isDrawMode, // in draw mode we handle scale manually
               minScale: 0.8,
               maxScale: 6.0,
               boundaryMargin: const EdgeInsets.all(80),
@@ -245,16 +279,16 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
           ),
 
-          // ── Drawing gesture (outside InteractiveViewer, toScene() converts coords) ──
-          // onPan* only fires for drags — taps on buttons go to buttons, not here.
+          // ── Drawing + zoom gesture (draw mode only) ──
+          // 1 finger = draw, 2 fingers = pinch-to-zoom (manual matrix update).
+          // Taps on UI buttons go to the buttons, not here (translucent).
           if (_isDrawMode)
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onPanStart: _onPanStart,
-                onPanUpdate: _onPanUpdate,
-                onPanEnd: _onPanEnd,
-                onPanCancel: _onPanCancel,
+                onScaleStart: _onScaleStart,
+                onScaleUpdate: _onScaleUpdate,
+                onScaleEnd: _onScaleEnd,
               ),
             ),
 
