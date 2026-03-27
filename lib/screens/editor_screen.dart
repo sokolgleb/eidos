@@ -284,10 +284,7 @@ class _EditorScreenState extends State<EditorScreen> {
               child: _BrushSettingsPanel(
                 color: _brushColor,
                 size: _brushSize,
-                onColorChanged: (c) => setState(() {
-                  _brushColor = c;
-                  _showBrushSettings = false;
-                }),
+                onColorChanged: (c) => setState(() => _brushColor = c),
                 onSizeChanged: (v) => setState(() => _brushSize = v),
               ),
             ),
@@ -304,6 +301,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     _IconBtn(
                       icon: Icons.brush,
                       active: _showBrushSettings,
+                      iconColor: _brushColor,
                       onTap: () =>
                           setState(() => _showBrushSettings = !_showBrushSettings),
                     ),
@@ -419,7 +417,7 @@ class _BrushSettingsPanel extends StatelessWidget {
           ),
 
           const SizedBox(height: 12),
-          _Slider(label: 'Size', value: size, min: 1.0, max: 100.0,
+          _Slider(label: 'Size', value: size, min: 1.0, max: 25.0,
               onChanged: onSizeChanged),
         ],
       ),
@@ -434,8 +432,9 @@ class _IconBtn extends StatelessWidget {
   final VoidCallback? onTap;
   final bool active;
   final String? tooltip;
+  final Color? iconColor;
 
-  const _IconBtn({required this.icon, this.onTap, this.active = false, this.tooltip});
+  const _IconBtn({required this.icon, this.onTap, this.active = false, this.tooltip, this.iconColor});
 
   @override
   Widget build(BuildContext context) {
@@ -451,7 +450,9 @@ class _IconBtn extends StatelessWidget {
         ),
         child: Icon(
           icon,
-          color: onTap == null ? Colors.white.withAlpha(60) : Colors.white,
+          color: onTap == null
+              ? Colors.white.withAlpha(60)
+              : (iconColor ?? Colors.white),
           size: 22,
         ),
       ),
