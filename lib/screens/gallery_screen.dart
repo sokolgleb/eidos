@@ -197,35 +197,31 @@ class _GalleryScreenState extends State<GalleryScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
+      floatingActionButton: GestureDetector(
+        onTap: _showPickerSheet,
+        child: Container(
+          width: 56, height: 56,
+          decoration: BoxDecoration(
+            color: Colors.white.withAlpha(25),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: const Icon(Icons.add, color: Colors.white, size: 26),
+        ),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       body: SafeArea(
         child: Column(
           children: [
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Row(
-                children: [
-                  const Text(
-                    'eidos',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w200,
-                      letterSpacing: 6,
-                    ),
-                  ),
-                  const Spacer(),
-                  GestureDetector(
-                    onTap: _showPickerSheet,
-                    child: Container(
-                      width: 40, height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withAlpha(20),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(Icons.add, color: Colors.white, size: 22),
-                    ),
-                  ),
-                ],
+              child: const Text(
+                'eidos',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w200,
+                  letterSpacing: 6,
+                ),
               ),
             ),
             Expanded(
@@ -520,11 +516,6 @@ class _DetailScreenState extends State<_DetailScreen> {
               onTap: () { Navigator.pop(context); _openEditor(); },
             ),
             ListTile(
-              leading: const Icon(Icons.download_outlined, color: Colors.white),
-              title: const Text('Save to gallery', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _saveToGallery(); },
-            ),
-            ListTile(
               leading: const Icon(Icons.ios_share_outlined, color: Colors.white),
               title: const Text('Share', style: TextStyle(color: Colors.white)),
               onTap: () { Navigator.pop(context); _share(); },
@@ -544,13 +535,7 @@ class _DetailScreenState extends State<_DetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    String revealLabel;
-    if (_lockedOriginal) {
-      revealLabel = _pressing ? 'annotated' : 'original ●';
-    } else {
-      revealLabel = _pressing ? 'original' : 'hold to reveal';
-    }
-
+    // true when the original photo is currently visible on screen
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
@@ -562,18 +547,29 @@ class _DetailScreenState extends State<_DetailScreen> {
         },
         child: Stack(
           children: [
-            // ── Images only ──
-            PageView.builder(
-              controller: _pageController,
-              itemCount: widget.sightings.length,
-              onPageChanged: _onPageChanged,
-              itemBuilder: (context, i) => _DetailPage(
-                key: ValueKey(widget.sightings[i].id),
-                sighting: widget.sightings[i],
-                showOriginal: _lockedOriginal
-                    ? (i == _currentIndex ? !_pressing : true)
-                    : (i == _currentIndex ? _pressing : false),
-                version: _versions[widget.sightings[i].id] ?? 0,
+            // ── Images + tap gestures ──
+            GestureDetector(
+              // Hold to peek original / annotated
+              onLongPressStart:  (_) => setState(() => _pressing = true),
+              onLongPressEnd:    (_) => setState(() => _pressing = false),
+              onLongPressCancel: ()  => setState(() => _pressing = false),
+              // Double-tap to lock current mode
+              onDoubleTap: () => setState(() {
+                _lockedOriginal = !_lockedOriginal;
+                _globalLockedOriginal = _lockedOriginal;
+              }),
+              child: PageView.builder(
+                controller: _pageController,
+                itemCount: widget.sightings.length,
+                onPageChanged: _onPageChanged,
+                itemBuilder: (context, i) => _DetailPage(
+                  key: ValueKey(widget.sightings[i].id),
+                  sighting: widget.sightings[i],
+                  showOriginal: _lockedOriginal
+                      ? (i == _currentIndex ? !_pressing : true)
+                      : (i == _currentIndex ? _pressing : false),
+                  version: _versions[widget.sightings[i].id] ?? 0,
+                ),
               ),
             ),
 
@@ -611,64 +607,32 @@ class _DetailScreenState extends State<_DetailScreen> {
               ),
             ),
 
-            // ── Top bar: back (left) + menu (right) ──
+            // ── Top bar: back button (left) ──
             Positioned(
               top: 0, left: 0, right: 0,
               child: SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Row(
-                    children: [
-                      _OverlayBtn(
-                        icon: Icons.arrow_back,
-                        onTap: () => Navigator.pop(context),
-                      ),
-                      const Spacer(),
-                      _OverlayBtn(
-                        icon: Icons.more_horiz,
-                        onTap: _showMenu,
-                      ),
-                    ],
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _OverlayBtn(
+                      icon: Icons.arrow_back,
+                      onTap: () => Navigator.pop(context),
+                    ),
                   ),
                 ),
               ),
             ),
 
-            // ── Bottom: hold-to-reveal centered ──
+            // ── Bottom bar: hamburger menu (left) ──
             Positioned(
               bottom: 0, left: 0, right: 0,
               child: SafeArea(
                 child: Padding(
-                  padding: const EdgeInsets.only(bottom: 28),
-                  child: Center(
-                    child: GestureDetector(
-                      onDoubleTap: () => setState(() {
-                        _lockedOriginal = !_lockedOriginal;
-                        _globalLockedOriginal = _lockedOriginal;
-                      }),
-                      onTapDown: (_) => setState(() => _pressing = true),
-                      onTapUp: (_) => setState(() => _pressing = false),
-                      onTapCancel: () {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) setState(() => _pressing = false);
-                        });
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: _lockedOriginal
-                              ? Colors.white.withAlpha(50)
-                              : Colors.white.withAlpha(30),
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: Text(
-                          revealLabel,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 15),
-                        ),
-                      ),
-                    ),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _OverlayBtn(icon: Icons.menu, onTap: _showMenu),
                   ),
                 ),
               ),
@@ -737,7 +701,7 @@ class _OverlayBtn extends StatelessWidget {
       child: Container(
         width: 44, height: 44,
         decoration: BoxDecoration(
-          color: Colors.black.withAlpha(120),
+          color: Colors.white.withAlpha(25),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Icon(icon, color: Colors.white, size: 22),
