@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:uuid/uuid.dart';
 import '../models/sighting.dart';
 import '../models/stroke.dart';
 import '../services/sighting_storage.dart';
@@ -209,7 +210,7 @@ class _EditorScreenState extends State<EditorScreen> {
         if (mounted) Navigator.pop(context, widget.sightingToUpdate);
       } else {
         // ── Create mode: new sighting ──
-        final id = DateTime.now().millisecondsSinceEpoch.toString();
+        final id = const Uuid().v4();
         final dir = await SightingStorage.sightingDir(id);
 
         final originalPath = '$dir/original.jpg';
@@ -220,25 +221,16 @@ class _EditorScreenState extends State<EditorScreen> {
 
         final sighting = Sighting(
           id: id,
-          createdAt: DateTime.now(),
+          createdAt: DateTime.now().toUtc(),
           originalPath: originalPath,
           annotatedPath: annotatedPath,
           syncStatus: SyncStatus.local,
         );
         await SightingStorage.save(sighting);
         if (mounted) Navigator.pop(context, sighting);
-        // Upload to cloud in background (don't await)
-        _uploadInBackground(sighting);
       }
     } finally {
       if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  Future<void> _uploadInBackground(Sighting sighting) async {
-    final synced = await CloudService.uploadSighting(sighting);
-    if (synced != null) {
-      await SightingStorage.save(synced);
     }
   }
 

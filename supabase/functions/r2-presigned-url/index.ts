@@ -116,18 +116,21 @@ serve(async (req) => {
   }
 
   try {
-    const { sightingId, fileType } = await req.json() as {
-      sightingId: string
-      fileType: 'original' | 'annotated'
-    }
+    const { sightingId } = await req.json() as { sightingId: string }
 
-    const ext = fileType === 'original' ? 'jpg' : 'png'
-    const objectKey = `${user.id}/${sightingId}/${fileType}.${ext}`
+    const origKey = `${user.id}/${sightingId}/original.jpg`
+    const annKey  = `${user.id}/${sightingId}/annotated.png`
 
-    const uploadUrl = await presignedPut(objectKey)
-    const publicUrl = `${R2_PUBLIC_BASE}/${objectKey}`
+    // Generate both presigned URLs in parallel
+    const [origUploadUrl, annUploadUrl] = await Promise.all([
+      presignedPut(origKey),
+      presignedPut(annKey),
+    ])
 
-    return new Response(JSON.stringify({ uploadUrl, publicUrl, objectKey }), {
+    return new Response(JSON.stringify({
+      original: { uploadUrl: origUploadUrl, publicUrl: `${R2_PUBLIC_BASE}/${origKey}` },
+      annotated: { uploadUrl: annUploadUrl, publicUrl: `${R2_PUBLIC_BASE}/${annKey}` },
+    }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   } catch (err) {

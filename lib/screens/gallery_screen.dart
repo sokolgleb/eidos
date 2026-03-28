@@ -51,7 +51,28 @@ class _GalleryScreenState extends State<GalleryScreen> {
 
   Future<void> _loadThenSync() async {
     await _load();
-    _syncUnsynced();
+    CloudService.syncProfile(); // fire and forget
+    await _syncUnsynced();
+    _reconcileWithRemote();     // fire and forget after uploads finish
+  }
+
+  /// Removes locally-synced sightings that no longer exist in the remote.
+  /// Skips silently on network errors to avoid accidental local data loss.
+  Future<void> _reconcileWithRemote() async {
+    final remoteIds = await CloudService.fetchRemoteSightingIds();
+    if (remoteIds == null) return; // network error — do nothing
+
+    final orphaned = _sightings
+        .where((s) =>
+            s.syncStatus == SyncStatus.synced && !remoteIds.contains(s.id))
+        .toList();
+
+    if (orphaned.isEmpty) return;
+
+    for (final s in orphaned) {
+      await SightingStorage.delete(s.id);
+    }
+    if (mounted) await _load();
   }
 
   Future<void> _load() async {
@@ -60,40 +81,45 @@ class _GalleryScreenState extends State<GalleryScreen> {
   }
 
   /// Upload any locally-only sightings to the cloud in the background.
-  /// Updates the tile icon as each one finishes.
+  /// Updates the tile icon as each one finishes. Uploads up to 2 at a time.
   Future<void> _syncUnsynced() async {
     await CloudService.ensureSignedIn();
     final unsynced = _sightings
         .where((s) =>
-            s.syncStatus != SyncStatus.synced && s.originalPath.isNotEmpty)
+            s.syncStatus == SyncStatus.local ||
+            s.syncStatus == SyncStatus.failed)
+        .where((s) => s.originalPath.isNotEmpty)
         .toList();
     if (unsynced.isEmpty) return;
 
-    for (final sighting in unsynced) {
-      // Mark as uploading in UI
+    // Mark all as uploading at once
+    if (mounted) {
+      setState(() {
+        for (final s in unsynced) {
+          final i = _sightings.indexWhere((x) => x.id == s.id);
+          if (i >= 0) _sightings[i] = s.copyWith(syncStatus: SyncStatus.uploading);
+        }
+      });
+    }
+
+    Future<void> uploadOne(Sighting sighting) async {
+      final synced = await CloudService.uploadSighting(sighting)
+          .timeout(const Duration(seconds: 90), onTimeout: () => null);
       if (mounted) {
         setState(() {
           final i = _sightings.indexWhere((s) => s.id == sighting.id);
           if (i >= 0) {
-            _sightings[i] = sighting.copyWith(syncStatus: SyncStatus.uploading);
+            _sightings[i] = synced ?? sighting.copyWith(syncStatus: SyncStatus.failed);
           }
         });
       }
+      if (synced != null) await SightingStorage.save(synced);
+    }
 
-      final synced = await CloudService.uploadSighting(sighting);
-
-      if (mounted) {
-        setState(() {
-          final i = _sightings.indexWhere((s) => s.id == sighting.id);
-          if (i >= 0) {
-            _sightings[i] = synced ??
-                sighting.copyWith(syncStatus: SyncStatus.failed);
-          }
-        });
-      }
-      if (synced != null) {
-        await SightingStorage.save(synced);
-      }
+    // Upload 2 at a time
+    for (int i = 0; i < unsynced.length; i += 2) {
+      final batch = unsynced.skip(i).take(2).toList();
+      await Future.wait(batch.map(uploadOne));
     }
   }
 
@@ -106,7 +132,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
       context,
       _fadeScaleRoute(EditorScreen(imagePath: file.path)),
     );
-    if (result != null) _load();
+    if (result != null) {
+      await _load();
+      _syncUnsynced(); // upload the new sighting and update UI
+    }
   }
 
   void _openDetail(int index) {
