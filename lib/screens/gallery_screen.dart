@@ -4,8 +4,10 @@ import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:gal/gal.dart';
 import '../models/sighting.dart';
+import '../services/auth_service.dart';
 import '../services/sighting_storage.dart';
 import '../services/cloud_service.dart';
+import 'account_screen.dart';
 import 'editor_screen.dart';
 
 // Persists the locked-original mode across navigation
@@ -52,6 +54,8 @@ class _GalleryScreenState extends State<GalleryScreen> {
   Future<void> _loadThenSync() async {
     await _load();
     CloudService.syncProfile(); // fire and forget
+    final downloaded = await CloudService.downloadFromCloud();
+    if (downloaded > 0) await _load(); // show newly downloaded sightings
     await _syncUnsynced();
     _reconcileWithRemote();     // fire and forget after uploads finish
   }
@@ -78,6 +82,12 @@ class _GalleryScreenState extends State<GalleryScreen> {
   Future<void> _load() async {
     final list = await SightingStorage.loadAll();
     if (mounted) setState(() { _sightings = list; _loading = false; });
+  }
+
+  Future<void> _refresh() async {
+    await CloudService.downloadFromCloud();
+    await _load();
+    _syncUnsynced();
   }
 
   /// Upload any locally-only sightings to the cloud in the background.
@@ -150,6 +160,15 @@ class _GalleryScreenState extends State<GalleryScreen> {
     });
   }
 
+  Future<void> _openAccount() async {
+    await Navigator.push(context, _fadeScaleRoute(const AccountScreen()));
+    if (mounted) {
+      await CloudService.downloadFromCloud(); // fetch new cloud sightings if any
+      await _load();
+      _syncUnsynced();
+    }
+  }
+
   void _showPickerSheet() {
     showModalBottomSheet(
       context: context,
@@ -214,14 +233,23 @@ class _GalleryScreenState extends State<GalleryScreen> {
           children: [
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: const Text(
-                'eidos',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.w200,
-                  letterSpacing: 6,
-                ),
+              child: Row(
+                children: [
+                  const Text(
+                    'eidos',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w200,
+                      letterSpacing: 6,
+                    ),
+                  ),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: _openAccount,
+                    child: _AccountAvatar(),
+                  ),
+                ],
               ),
             ),
             Expanded(
@@ -239,22 +267,27 @@ class _GalleryScreenState extends State<GalleryScreen> {
                               setState(() => _tileSize = next);
                             }
                           },
-                          child: GridView.builder(
-                            padding: EdgeInsets.zero,
-                            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                              maxCrossAxisExtent: effectiveTileSize,
-                              crossAxisSpacing: 0,
-                              mainAxisSpacing: 0,
-                              childAspectRatio: 1,
-                            ),
-                            itemCount: _sightings.length,
-                            itemBuilder: (context, i) => _SightingTile(
-                              sighting: _sightings[i],
-                              onTap: () => _openDetail(i),
-                              onDelete: () async {
-                                await SightingStorage.delete(_sightings[i].id);
-                                _load();
-                              },
+                          child: RefreshIndicator(
+                            onRefresh: _refresh,
+                            color: Colors.white,
+                            backgroundColor: Colors.grey[900],
+                            child: GridView.builder(
+                              padding: EdgeInsets.zero,
+                              gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: effectiveTileSize,
+                                crossAxisSpacing: 0,
+                                mainAxisSpacing: 0,
+                                childAspectRatio: 1,
+                              ),
+                              itemCount: _sightings.length,
+                              itemBuilder: (context, i) => _SightingTile(
+                                sighting: _sightings[i],
+                                onTap: () => _openDetail(i),
+                                onDelete: () async {
+                                  await SightingStorage.delete(_sightings[i].id);
+                                  _load();
+                                },
+                              ),
                             ),
                           ),
                         ),
@@ -707,6 +740,48 @@ class _OverlayBtn extends StatelessWidget {
         child: Icon(icon, color: Colors.white, size: 22),
       ),
     );
+  }
+}
+
+// ─── Account avatar (header) ──────────────────────────────────────────────────
+
+class _AccountAvatar extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final avatarUrl = AuthService.avatarUrl;
+    final name = AuthService.displayName;
+    final isAnon = AuthService.isAnonymous;
+
+    return Container(
+      width: 32, height: 32,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white.withAlpha(20),
+        border: Border.all(color: Colors.white.withAlpha(40), width: 1),
+      ),
+      child: ClipOval(
+        child: avatarUrl != null
+            ? Image.network(avatarUrl, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _anonIcon(name, isAnon))
+            : _anonIcon(name, isAnon),
+      ),
+    );
+  }
+
+  Widget _anonIcon(String? name, bool isAnon) {
+    if (!isAnon && name != null && name.isNotEmpty) {
+      return Center(
+        child: Text(
+          name[0].toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.w300,
+          ),
+        ),
+      );
+    }
+    return const Icon(Icons.person_outline, color: Colors.white54, size: 18);
   }
 }
 

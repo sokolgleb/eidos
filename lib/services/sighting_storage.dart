@@ -44,6 +44,13 @@ class SightingStorage {
     await prefs.setStringList(_key, raw);
   }
 
+  static Future<void> deleteAll() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key);
+    final dir = await _sightingsDir();
+    if (await dir.exists()) await dir.delete(recursive: true);
+  }
+
   static Future<void> delete(String id) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList(_key) ?? [];

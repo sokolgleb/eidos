@@ -45,6 +45,17 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array><string>com.sokolgleb.eidos</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array><string>com.googleusercontent.apps.407860456187-ntdr7bkdepdrtvnlq0r1mt23sehd6nv3</string></array>
+		</dict>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Eidos uses the camera to photograph things you want to reveal.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

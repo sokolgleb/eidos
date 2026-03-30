@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/sighting.dart';
 import 'device_info_service.dart';
+import 'sighting_storage.dart';
 
 class CloudService {
   static SupabaseClient get _db => Supabase.instance.client;
@@ -25,32 +26,42 @@ class CloudService {
       final uid = userId;
       if (uid == null) return;
 
+      final user     = _db.auth.currentUser;
       final version  = await DeviceInfoService.getAppVersion();
       final platform = DeviceInfoService.platform;
       final loc      = await DeviceInfoService.getLocation();
 
-      // Fetch current state so we can handle one-time fields
+      // OAuth providers from Supabase identities (excludes anonymous)
+      final newProviders = (user?.identities ?? [])
+          .map((i) => i.provider)
+          .where((p) => p != 'anonymous')
+          .toList();
+
+      // Fetch current state so we can handle one-time / append-only fields
       final row = await _db
           .from('profiles')
-          .select('platforms, language')
+          .select('platforms, language, oauth_providers')
           .eq('id', uid)
           .maybeSingle();
 
       final currentPlatforms =
           (row?['platforms'] as List?)?.cast<String>() ?? [];
+      final currentProviders =
+          (row?['oauth_providers'] as List?)?.cast<String>() ?? [];
+      final mergedProviders =
+          {...currentProviders, ...newProviders}.toList();
 
       await _db.from('profiles').upsert({
-        'id':          uid,
-        'app_version': version,
+        'id':             uid,
+        'app_version':    version,
         if (loc.ip   != null) 'ip':   loc.ip,
         if (loc.iso2 != null) 'iso2': loc.iso2,
-        // Append platform only if not already present
         'platforms': currentPlatforms.contains(platform)
             ? currentPlatforms
             : [...currentPlatforms, platform],
-        // Language is set once — DB trigger preserves it on subsequent updates,
-        // but we also skip it here to avoid the upsert touching it at all.
         if (row?['language'] == null) 'language': DeviceInfoService.language,
+        'oauth_providers': mergedProviders,
+        if (user?.email != null) 'email': user!.email,
       });
     } catch (_) {
       // Non-fatal
@@ -138,6 +149,68 @@ class CloudService {
       await ensureSignedIn();
       await _db.from('sightings').update({'status': 'deleted'}).eq('id', id);
     } catch (_) {}
+  }
+
+  // ── Download from cloud ───────────────────────────────────────────────────
+
+  /// Downloads remote sightings that aren't on this device yet.
+  /// Returns the number of newly downloaded sightings.
+  static Future<int> downloadFromCloud() async {
+    try {
+      await ensureSignedIn();
+      final remote = await fetchRemoteSightings();
+      if (remote.isEmpty) return 0;
+
+      final localIds = (await SightingStorage.loadAll()).map((s) => s.id).toSet();
+
+      final toDownload = remote
+          .where((s) => !localIds.contains(s.id))
+          .where((s) => s.originalUrl != null && s.annotatedUrl != null)
+          .toList();
+      if (toDownload.isEmpty) return 0;
+
+      int count = 0;
+      for (final remote in toDownload) {
+        try {
+          final dir = await SightingStorage.sightingDir(remote.id);
+          final origPath = '$dir/original.jpg';
+          final annPath  = '$dir/annotated.png';
+          await Future.wait([
+            _downloadFile(remote.originalUrl!, origPath),
+            _downloadFile(remote.annotatedUrl!, annPath),
+          ]);
+          await SightingStorage.save(Sighting(
+            id:           remote.id,
+            createdAt:    remote.createdAt,
+            originalPath: origPath,
+            annotatedPath: annPath,
+            originalUrl:  remote.originalUrl,
+            annotatedUrl: remote.annotatedUrl,
+            syncStatus:   SyncStatus.synced,
+          ));
+          count++;
+        } catch (_) {
+          // Skip sightings that fail to download
+        }
+      }
+      return count;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static Future<void> _downloadFile(String url, String savePath) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 30);
+    try {
+      final req  = await client.getUrl(Uri.parse(url));
+      final resp = await req.close().timeout(const Duration(seconds: 60));
+      final bytes = <int>[];
+      await resp.forEach(bytes.addAll);
+      await File(savePath).writeAsBytes(bytes);
+    } finally {
+      client.close();
+    }
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
