@@ -41,6 +41,7 @@ class GalleryScreen extends StatefulWidget {
 class _GalleryScreenState extends State<GalleryScreen> {
   List<Sighting> _sightings = [];
   bool _loading = true;
+  bool _syncing = false;
 
   double? _tileSize;
   double _baseTileSize = 0;
@@ -163,8 +164,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
   Future<void> _openAccount() async {
     await Navigator.push(context, _fadeScaleRoute(const AccountScreen()));
     if (mounted) {
-      await CloudService.downloadFromCloud(); // fetch new cloud sightings if any
-      await _load();
+      setState(() => _syncing = true);
+      final downloaded = await CloudService.downloadFromCloud();
+      if (downloaded > 0) await _load();
+      if (mounted) setState(() => _syncing = false);
       _syncUnsynced();
     }
   }
@@ -252,6 +255,12 @@ class _GalleryScreenState extends State<GalleryScreen> {
                 ],
               ),
             ),
+            if (_syncing)
+              const LinearProgressIndicator(
+                color: Colors.white24,
+                backgroundColor: Colors.transparent,
+                minHeight: 2,
+              ),
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator(color: Colors.white38))
