@@ -1,34 +1,51 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../services/device_info_service.dart';
 import '../services/sighting_storage.dart';
 
 class AccountScreen extends StatefulWidget {
-  const AccountScreen({super.key});
+  /// Called after sign-in/sign-out so the shell can react (e.g. reload gallery).
+  final VoidCallback? onAuthChanged;
+
+  const AccountScreen({super.key, this.onAuthChanged});
 
   @override
-  State<AccountScreen> createState() => _AccountScreenState();
+  AccountScreenState createState() => AccountScreenState();
 }
 
-class _AccountScreenState extends State<AccountScreen> {
+class AccountScreenState extends State<AccountScreen> {
+  /// Reload info (sighting count, etc.) — called from MainShell.
+  void reload() => _loadInfo();
+
   int _sightingCount = 0;
   bool _loading = false;
+  String _appVersion = '';
 
   @override
   void initState() {
     super.initState();
-    _loadCount();
+    _loadInfo();
   }
 
-  Future<void> _loadCount() async {
+  Future<void> _loadInfo() async {
     final list = await SightingStorage.loadAll();
-    if (mounted) setState(() => _sightingCount = list.length);
+    final version = await DeviceInfoService.getAppVersion();
+    if (mounted) {
+      setState(() {
+        _sightingCount = list.length;
+        _appVersion = version;
+      });
+    }
   }
 
   Future<void> _signInWithGoogle() async {
     setState(() => _loading = true);
     try {
       final success = await AuthService.signInWithGoogle();
-      if (mounted && success) Navigator.pop(context);
+      if (mounted && success) {
+        widget.onAuthChanged?.call();
+        _loadInfo();
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -47,7 +64,51 @@ class _AccountScreenState extends State<AccountScreen> {
     setState(() => _loading = true);
     try {
       await AuthService.signOut();
-      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        widget.onAuthChanged?.call();
+        _loadInfo();
+        setState(() {}); // rebuild in place
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final cs = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Delete account?',
+            style: TextStyle(color: cs.onSurface)),
+        content: Text(
+          'This will clear all local data and sign you out. '
+          'Your cloud data may be retained for a period.',
+          style: TextStyle(color: cs.onSurface.withAlpha(180)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel',
+                style: TextStyle(color: cs.onSurface.withAlpha(140))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete',
+                style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _loading = true);
+    try {
+      await AuthService.deleteAccount();
+      if (mounted) {
+        widget.onAuthChanged?.call();
+        _loadInfo();
+        setState(() {});
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -59,33 +120,24 @@ class _AccountScreenState extends State<AccountScreen> {
     final name = AuthService.displayName;
     final avatar = AuthService.avatarUrl;
     final email = AuthService.currentUser?.email;
+    final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
           children: [
-            // Back button
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: GestureDetector(
-                  onTap: () => Navigator.pop(context),
-                  child: Container(
-                    width: 44, height: 44,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withAlpha(25),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
-                  ),
-                ),
+            Text(
+              'Profile',
+              style: TextStyle(
+                color: cs.onSurface,
+                fontSize: 24,
+                fontWeight: FontWeight.w200,
+                letterSpacing: 2,
               ),
             ),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 32),
 
             // Avatar
             Center(
@@ -98,8 +150,8 @@ class _AccountScreenState extends State<AccountScreen> {
             Center(
               child: Text(
                 isAnon ? 'Anonymous' : (name ?? 'Signed in'),
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: cs.onSurface,
                   fontSize: 20,
                   fontWeight: FontWeight.w300,
                   letterSpacing: 0.5,
@@ -114,7 +166,7 @@ class _AccountScreenState extends State<AccountScreen> {
               child: Text(
                 isAnon ? 'No account' : (email ?? ''),
                 style: TextStyle(
-                  color: Colors.white.withAlpha(100),
+                  color: cs.onSurface.withAlpha(100),
                   fontSize: 14,
                 ),
               ),
@@ -127,7 +179,7 @@ class _AccountScreenState extends State<AccountScreen> {
               child: Text(
                 '$_sightingCount ${_sightingCount == 1 ? 'sighting' : 'sightings'}',
                 style: TextStyle(
-                  color: Colors.white.withAlpha(140),
+                  color: cs.onSurface.withAlpha(140),
                   fontSize: 15,
                   fontWeight: FontWeight.w300,
                 ),
@@ -136,16 +188,15 @@ class _AccountScreenState extends State<AccountScreen> {
 
             const SizedBox(height: 32),
 
-            Divider(color: Colors.white.withAlpha(30), height: 1),
+            Divider(color: cs.onSurface.withAlpha(30), height: 1),
 
             const SizedBox(height: 24),
 
             if (_loading)
-              const Center(
-                child: CircularProgressIndicator(color: Colors.white38, strokeWidth: 1.5),
+              Center(
+                child: CircularProgressIndicator(color: cs.onSurface.withAlpha(97), strokeWidth: 1.5),
               )
             else if (isAnon) ...[
-              // Sign in with Google
               _AuthButton(
                 onTap: _signInWithGoogle,
                 child: Row(
@@ -153,9 +204,9 @@ class _AccountScreenState extends State<AccountScreen> {
                   children: [
                     _GoogleLogo(),
                     const SizedBox(width: 12),
-                    const Text(
+                    Text(
                       'Sign in with Google',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
+                      style: TextStyle(color: cs.onSurface, fontSize: 16),
                     ),
                   ],
                 ),
@@ -163,17 +214,16 @@ class _AccountScreenState extends State<AccountScreen> {
 
               const SizedBox(height: 12),
 
-              // Sign in with Apple (disabled — requires paid Apple Developer account)
               _AuthButton(
                 onTap: null,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.apple, color: Colors.white.withAlpha(60), size: 22),
+                    Icon(Icons.apple, color: cs.onSurface.withAlpha(60), size: 22),
                     const SizedBox(width: 12),
                     Text(
                       'Sign in with Apple',
-                      style: TextStyle(color: Colors.white.withAlpha(60), fontSize: 16),
+                      style: TextStyle(color: cs.onSurface.withAlpha(60), fontSize: 16),
                     ),
                   ],
                 ),
@@ -181,20 +231,20 @@ class _AccountScreenState extends State<AccountScreen> {
             ] else ...[
               // Sign out
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: GestureDetector(
                   onTap: _signOut,
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.white.withAlpha(40)),
+                      border: Border.all(color: cs.onSurface.withAlpha(40)),
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: Center(
                       child: Text(
                         'Sign out',
                         style: TextStyle(
-                          color: Colors.white.withAlpha(180),
+                          color: cs.onSurface.withAlpha(180),
                           fontSize: 15,
                         ),
                       ),
@@ -203,6 +253,89 @@ class _AccountScreenState extends State<AccountScreen> {
                 ),
               ),
             ],
+
+            const SizedBox(height: 40),
+            Divider(color: cs.onSurface.withAlpha(30), height: 1),
+            const SizedBox(height: 16),
+
+            // Terms of Service
+            _MenuRow(
+              label: 'Terms of Service',
+              onTap: () {
+                // Placeholder
+              },
+            ),
+
+            // Send feedback
+            _MenuRow(
+              label: 'Send feedback',
+              onTap: () {
+                // Placeholder
+              },
+            ),
+
+            if (!isAnon && !_loading) ...[
+              const SizedBox(height: 24),
+              // Delete account
+              Center(
+                child: GestureDetector(
+                  onTap: _deleteAccount,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Text(
+                      'Delete account',
+                      style: TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 32),
+
+            // App version
+            Center(
+              child: Text(
+                _appVersion.isNotEmpty ? 'v$_appVersion' : '',
+                style: TextStyle(
+                  color: cs.onSurface.withAlpha(60),
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Menu row ────────────────────────────────────────────────────────────────
+
+class _MenuRow extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _MenuRow({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        child: Row(
+          children: [
+            Text(label,
+                style: TextStyle(color: cs.onSurface, fontSize: 16)),
+            const Spacer(),
+            Icon(Icons.chevron_right, color: cs.onSurface.withAlpha(60), size: 20),
           ],
         ),
       ),
@@ -221,11 +354,12 @@ class _Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Container(
       width: 80, height: 80,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: Colors.white.withAlpha(20),
+        color: cs.onSurface.withAlpha(20),
       ),
       clipBehavior: Clip.antiAlias,
       child: avatarUrl != null
@@ -242,14 +376,15 @@ class _Initial extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final letter = (name != null && name!.isNotEmpty)
         ? name![0].toUpperCase()
         : '?';
     return Center(
       child: Text(
         letter,
-        style: const TextStyle(
-          color: Colors.white,
+        style: TextStyle(
+          color: cs.onSurface,
           fontSize: 32,
           fontWeight: FontWeight.w200,
         ),
@@ -268,16 +403,17 @@ class _AuthButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: GestureDetector(
         onTap: onTap,
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 14),
           decoration: BoxDecoration(
-            color: Colors.white.withAlpha(15),
+            color: cs.onSurface.withAlpha(15),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.white.withAlpha(30)),
+            border: Border.all(color: cs.onSurface.withAlpha(30)),
           ),
           child: child,
         ),
@@ -286,14 +422,14 @@ class _AuthButton extends StatelessWidget {
   }
 }
 
-// ─── Google logo (simple G) ───────────────────────────────────────────────────
+// ─── Google logo ──────────────────────────────────────────────────────────────
 
 class _GoogleLogo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
       width: 22, height: 22,
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         shape: BoxShape.circle,
         color: Colors.white,
       ),

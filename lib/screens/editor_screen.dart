@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -186,6 +187,32 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() => _strokes = _strokes.sublist(0, _strokes.length - 1));
   }
 
+  /// Resizes [pngBytes] to ~300px wide and encodes as JPEG.
+  Future<Uint8List> _generateThumbnail(Uint8List pngBytes) async {
+    final codec = await ui.instantiateImageCodec(pngBytes);
+    final frame = await codec.getNextFrame();
+    final fullImage = frame.image;
+
+    const thumbWidth = 300;
+    final scale = thumbWidth / fullImage.width;
+    final thumbHeight = (fullImage.height * scale).round();
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImageRect(
+      fullImage,
+      Rect.fromLTWH(0, 0, fullImage.width.toDouble(), fullImage.height.toDouble()),
+      Rect.fromLTWH(0, 0, thumbWidth.toDouble(), thumbHeight.toDouble()),
+      Paint()..filterQuality = FilterQuality.medium,
+    );
+    final picture = recorder.endRecording();
+    final thumbImage = await picture.toImage(thumbWidth, thumbHeight);
+    final byteData = await thumbImage.toByteData(format: ui.ImageByteFormat.png);
+    // Re-encode the resized image as PNG (Flutter doesn't have native JPEG encoding,
+    // but the small size still makes it fast to load)
+    return byteData!.buffer.asUint8List();
+  }
+
   Future<void> _save() async {
     if (_saving) return;
     setState(() => _saving = true);
@@ -201,13 +228,29 @@ class _EditorScreenState extends State<EditorScreen> {
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       final pngBytes = byteData!.buffer.asUint8List();
 
+      // Generate thumbnail from the annotated image
+      final thumbBytes = await _generateThumbnail(pngBytes);
+
       if (widget.sightingToUpdate != null) {
-        // ── Edit mode: overwrite annotated file, no new DB entry ──
+        // ── Edit mode: overwrite annotated file + thumbnail, no new DB entry ──
         final annotatedFile = File(widget.sightingToUpdate!.annotatedPath);
         await annotatedFile.writeAsBytes(pngBytes);
-        // Evict from Flutter image cache so the updated file loads from disk
+
+        final thumbPath = widget.sightingToUpdate!.thumbnailPath.isNotEmpty
+            ? widget.sightingToUpdate!.thumbnailPath
+            : '${annotatedFile.parent.path}/thumbnail.jpg';
+        await File(thumbPath).writeAsBytes(thumbBytes);
+
+        // Evict from Flutter image cache so the updated files load from disk
         PaintingBinding.instance.imageCache.evict(FileImage(annotatedFile));
-        if (mounted) Navigator.pop(context, widget.sightingToUpdate);
+        PaintingBinding.instance.imageCache.evict(FileImage(File(thumbPath)));
+
+        final updated = widget.sightingToUpdate!.copyWith(
+          thumbnailPath: thumbPath,
+          syncStatus: SyncStatus.local,
+        );
+        await SightingStorage.save(updated);
+        if (mounted) Navigator.pop(context, updated);
       } else {
         // ── Create mode: new sighting ──
         final id = const Uuid().v4();
@@ -219,11 +262,15 @@ class _EditorScreenState extends State<EditorScreen> {
         final annotatedPath = '$dir/annotated.png';
         await File(annotatedPath).writeAsBytes(pngBytes);
 
+        final thumbnailPath = '$dir/thumbnail.jpg';
+        await File(thumbnailPath).writeAsBytes(thumbBytes);
+
         final sighting = Sighting(
           id: id,
           createdAt: DateTime.now().toUtc(),
           originalPath: originalPath,
           annotatedPath: annotatedPath,
+          thumbnailPath: thumbnailPath,
           syncStatus: SyncStatus.local,
         );
         await SightingStorage.save(sighting);

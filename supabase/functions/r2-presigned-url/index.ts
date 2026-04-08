@@ -102,7 +102,8 @@ serve(async (req) => {
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_ANON_KEY')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    { auth: { persistSession: false } },
   )
 
   // In Edge Functions, verify the JWT by passing it directly to getUser()
@@ -118,18 +119,21 @@ serve(async (req) => {
   try {
     const { sightingId } = await req.json() as { sightingId: string }
 
-    const origKey = `${user.id}/${sightingId}/original.jpg`
-    const annKey  = `${user.id}/${sightingId}/annotated.png`
+    const origKey  = `${user.id}/${sightingId}/original.jpg`
+    const annKey   = `${user.id}/${sightingId}/annotated.png`
+    const thumbKey = `${user.id}/${sightingId}/thumbnail.jpg`
 
-    // Generate both presigned URLs in parallel
-    const [origUploadUrl, annUploadUrl] = await Promise.all([
+    // Generate all presigned URLs in parallel
+    const [origUploadUrl, annUploadUrl, thumbUploadUrl] = await Promise.all([
       presignedPut(origKey),
       presignedPut(annKey),
+      presignedPut(thumbKey),
     ])
 
     return new Response(JSON.stringify({
-      original: { uploadUrl: origUploadUrl, publicUrl: `${R2_PUBLIC_BASE}/${origKey}` },
-      annotated: { uploadUrl: annUploadUrl, publicUrl: `${R2_PUBLIC_BASE}/${annKey}` },
+      original:  { uploadUrl: origUploadUrl,  publicUrl: `${R2_PUBLIC_BASE}/${origKey}` },
+      annotated: { uploadUrl: annUploadUrl,   publicUrl: `${R2_PUBLIC_BASE}/${annKey}` },
+      thumbnail: { uploadUrl: thumbUploadUrl, publicUrl: `${R2_PUBLIC_BASE}/${thumbKey}` },
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })

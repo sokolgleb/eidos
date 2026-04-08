@@ -1,50 +1,31 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:gal/gal.dart';
 import '../models/sighting.dart';
-import '../services/auth_service.dart';
 import '../services/sighting_storage.dart';
 import '../services/cloud_service.dart';
-import 'account_screen.dart';
+import '../utils/route_transitions.dart';
+import 'detail_screen.dart';
 import 'editor_screen.dart';
-
-// Persists the locked-original mode across navigation
-bool _globalLockedOriginal = false;
-
-// Fade + scale-up route (modal feel, no slide)
-Route<T> _fadeScaleRoute<T>(Widget page) => PageRouteBuilder<T>(
-      pageBuilder: (_, __, ___) => page,
-      transitionDuration: const Duration(milliseconds: 300),
-      reverseTransitionDuration: const Duration(milliseconds: 220),
-      transitionsBuilder: (_, animation, __, child) {
-        return FadeTransition(
-          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.93, end: 1.0).animate(
-              CurvedAnimation(parent: animation, curve: Curves.easeOut),
-            ),
-            child: child,
-          ),
-        );
-      },
-    );
 
 class GalleryScreen extends StatefulWidget {
   const GalleryScreen({super.key});
 
   @override
-  State<GalleryScreen> createState() => _GalleryScreenState();
+  GalleryScreenState createState() => GalleryScreenState();
 }
 
-class _GalleryScreenState extends State<GalleryScreen> {
+class GalleryScreenState extends State<GalleryScreen> {
   List<Sighting> _sightings = [];
   bool _loading = true;
-  bool _syncing = false;
+  final bool _syncing = false;
 
   double? _tileSize;
   double _baseTileSize = 0;
+
+  // Multi-select
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = {};
 
   @override
   void initState() {
@@ -52,20 +33,29 @@ class _GalleryScreenState extends State<GalleryScreen> {
     _loadThenSync();
   }
 
-  Future<void> _loadThenSync() async {
-    await _load();
-    CloudService.syncProfile(); // fire and forget
-    final downloaded = await CloudService.downloadFromCloud();
-    if (downloaded > 0) await _load(); // show newly downloaded sightings
-    await _syncUnsynced();
-    _reconcileWithRemote();     // fire and forget after uploads finish
+  /// Public reload method — called from MainShell after auth change or adding a sighting.
+  /// Public reload — called from MainShell after auth change or adding a sighting.
+  Future<void> reload({VoidCallback? onProgress}) async {
+    await _loadThenSync(onProgress: onProgress);
   }
 
-  /// Removes locally-synced sightings that no longer exist in the remote.
-  /// Skips silently on network errors to avoid accidental local data loss.
+  Future<void> _loadThenSync({VoidCallback? onProgress}) async {
+    await _load();
+    CloudService.syncProfile();
+    final downloaded = await CloudService.downloadFromCloud(
+      onProgress: () {
+        if (mounted) _load();
+        onProgress?.call();
+      },
+    );
+    if (downloaded > 0) await _load();
+    await _syncUnsynced();
+    _reconcileWithRemote();
+  }
+
   Future<void> _reconcileWithRemote() async {
     final remoteIds = await CloudService.fetchRemoteSightingIds();
-    if (remoteIds == null) return; // network error — do nothing
+    if (remoteIds == null || remoteIds.isEmpty) return;
 
     final orphaned = _sightings
         .where((s) =>
@@ -91,8 +81,6 @@ class _GalleryScreenState extends State<GalleryScreen> {
     _syncUnsynced();
   }
 
-  /// Upload any locally-only sightings to the cloud in the background.
-  /// Updates the tile icon as each one finishes. Uploads up to 2 at a time.
   Future<void> _syncUnsynced() async {
     await CloudService.ensureSignedIn();
     final unsynced = _sightings
@@ -103,7 +91,6 @@ class _GalleryScreenState extends State<GalleryScreen> {
         .toList();
     if (unsynced.isEmpty) return;
 
-    // Mark all as uploading at once
     if (mounted) {
       setState(() {
         for (final s in unsynced) {
@@ -127,86 +114,106 @@ class _GalleryScreenState extends State<GalleryScreen> {
       if (synced != null) await SightingStorage.save(synced);
     }
 
-    // Upload 2 at a time
     for (int i = 0; i < unsynced.length; i += 2) {
       final batch = unsynced.skip(i).take(2).toList();
       await Future.wait(batch.map(uploadOne));
     }
   }
 
-  Future<void> _pickAndEdit(ImageSource source) async {
+  /// Pick an image and open the editor. Called from MainShell.
+  Future<void> pickAndEdit(ImageSource source) async {
     final picker = ImagePicker();
     final file = await picker.pickImage(source: source, imageQuality: 90);
     if (file == null) return;
     if (!mounted) return;
     final result = await Navigator.push<Sighting>(
       context,
-      _fadeScaleRoute(EditorScreen(imagePath: file.path)),
+      fadeScaleRoute(EditorScreen(imagePath: file.path)),
     );
     if (result != null) {
       await _load();
-      _syncUnsynced(); // upload the new sighting and update UI
-    }
-  }
-
-  void _openDetail(int index) {
-    Navigator.push<bool>(
-      context,
-      _fadeScaleRoute(_DetailScreen(
-        sightings: _sightings,
-        initialIndex: index,
-      )),
-    ).then((deleted) {
-      if (deleted == true) _load();
-    });
-  }
-
-  Future<void> _openAccount() async {
-    await Navigator.push(context, _fadeScaleRoute(const AccountScreen()));
-    if (mounted) {
-      setState(() => _syncing = true);
-      final downloaded = await CloudService.downloadFromCloud();
-      if (downloaded > 0) await _load();
-      if (mounted) setState(() => _syncing = false);
       _syncUnsynced();
     }
   }
 
-  void _showPickerSheet() {
-    showModalBottomSheet(
+  void _openDetail(int index) {
+    Navigator.push(
+      context,
+      fadeScaleRoute(DetailScreen(
+        sightings: _sightings,
+        initialIndex: index,
+        onChanged: () => _load(),
+      )),
+    );
+  }
+
+  // ── Multi-select ───────────────────────────────────────────────────────────
+
+  void _enterSelectionMode(String id) {
+    setState(() {
+      _selectionMode = true;
+      _selectedIds.add(id);
+    });
+  }
+
+  void _toggleSelection(String id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+        if (_selectedIds.isEmpty) _selectionMode = false;
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  Future<void> _batchDelete() async {
+    final count = _selectedIds.length;
+    final cs = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
       context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: 16),
-            ListTile(
-              leading: const Icon(Icons.camera_alt_outlined, color: Colors.white),
-              title: const Text('Take a photo', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _pickAndEdit(ImageSource.camera); },
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_outlined, color: Colors.white),
-              title: const Text('Choose from gallery', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _pickAndEdit(ImageSource.gallery); },
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
+      builder: (_) => AlertDialog(
+        title: Text('Delete $count ${count == 1 ? 'sighting' : 'sightings'}?',
+            style: TextStyle(color: cs.onSurface)),
+        content: Text('This cannot be undone.',
+            style: TextStyle(color: cs.onSurface.withAlpha(180))),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel',
+                style: TextStyle(color: cs.onSurface.withAlpha(140))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete',
+                style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
       ),
     );
+    if (confirmed != true || !mounted) return;
+    for (final id in _selectedIds) {
+      await SightingStorage.delete(id);
+      CloudService.deleteSighting(id);
+    }
+    _exitSelectionMode();
+    await _load();
+  }
+
+  Future<void> _batchShare() async {
+    final files = _sightings
+        .where((s) => _selectedIds.contains(s.id))
+        .map((s) => XFile(s.annotatedPath))
+        .toList();
+    if (files.isEmpty) return;
+    await Share.shareXFiles(files);
   }
 
   @override
@@ -216,56 +223,46 @@ class _GalleryScreenState extends State<GalleryScreen> {
     final effectiveTileSize = (_tileSize != null && _tileSize! > 0)
         ? _tileSize!
         : (screenWidth > 0 ? screenWidth / 3 : 120.0);
+    final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      backgroundColor: Colors.black,
-      floatingActionButton: GestureDetector(
-        onTap: _showPickerSheet,
-        child: Container(
-          width: 56, height: 56,
-          decoration: BoxDecoration(
-            color: Colors.white.withAlpha(25),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: const Icon(Icons.add, color: Colors.white, size: 26),
-        ),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       body: SafeArea(
         child: Column(
           children: [
+            // Header
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Row(
-                children: [
-                  const Text(
-                    'eidos',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w200,
-                      letterSpacing: 6,
+              child: _selectionMode
+                  ? _SelectionToolbar(
+                      count: _selectedIds.length,
+                      onClose: _exitSelectionMode,
+                      onDelete: _batchDelete,
+                      onShare: _batchShare,
+                    )
+                  : Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'eidos',
+                        style: TextStyle(
+                          color: cs.onSurface,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w200,
+                          letterSpacing: 6,
+                        ),
+                      ),
                     ),
-                  ),
-                  const Spacer(),
-                  GestureDetector(
-                    onTap: _openAccount,
-                    child: _AccountAvatar(),
-                  ),
-                ],
-              ),
             ),
             if (_syncing)
-              const LinearProgressIndicator(
-                color: Colors.white24,
+              LinearProgressIndicator(
+                color: cs.onSurface.withAlpha(60),
                 backgroundColor: Colors.transparent,
                 minHeight: 2,
               ),
             Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator(color: Colors.white38))
+                  ? Center(child: CircularProgressIndicator(color: cs.onSurface.withAlpha(97)))
                   : _sightings.isEmpty
-                      ? _EmptyState(onAdd: _showPickerSheet)
+                      ? const _EmptyState()
                       : GestureDetector(
                           onScaleStart: (_) { _baseTileSize = _tileSize!; },
                           onScaleUpdate: (details) {
@@ -278,8 +275,8 @@ class _GalleryScreenState extends State<GalleryScreen> {
                           },
                           child: RefreshIndicator(
                             onRefresh: _refresh,
-                            color: Colors.white,
-                            backgroundColor: Colors.grey[900],
+                            color: cs.onSurface,
+                            backgroundColor: cs.surfaceContainerHigh,
                             child: GridView.builder(
                               padding: EdgeInsets.zero,
                               gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
@@ -289,14 +286,27 @@ class _GalleryScreenState extends State<GalleryScreen> {
                                 childAspectRatio: 1,
                               ),
                               itemCount: _sightings.length,
-                              itemBuilder: (context, i) => _SightingTile(
-                                sighting: _sightings[i],
-                                onTap: () => _openDetail(i),
-                                onDelete: () async {
-                                  await SightingStorage.delete(_sightings[i].id);
-                                  _load();
-                                },
-                              ),
+                              itemBuilder: (context, i) {
+                                final s = _sightings[i];
+                                final selected = _selectedIds.contains(s.id);
+                                return _SightingTile(
+                                  sighting: s,
+                                  selected: selected,
+                                  selectionMode: _selectionMode,
+                                  onTap: () {
+                                    if (_selectionMode) {
+                                      _toggleSelection(s.id);
+                                    } else {
+                                      _openDetail(i);
+                                    }
+                                  },
+                                  onLongPress: () {
+                                    if (!_selectionMode) {
+                                      _enterSelectionMode(s.id);
+                                    }
+                                  },
+                                );
+                              },
                             ),
                           ),
                         ),
@@ -308,17 +318,81 @@ class _GalleryScreenState extends State<GalleryScreen> {
   }
 }
 
+// ─── Selection toolbar ───────────────────────────────────────────────────────
+
+class _SelectionToolbar extends StatelessWidget {
+  final int count;
+  final VoidCallback onClose;
+  final VoidCallback onDelete;
+  final VoidCallback onShare;
+
+  const _SelectionToolbar({
+    required this.count,
+    required this.onClose,
+    required this.onDelete,
+    required this.onShare,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        GestureDetector(
+          onTap: onClose,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(Icons.close, color: cs.onSurface, size: 22),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          '$count selected',
+          style: TextStyle(
+            color: cs.onSurface,
+            fontSize: 17,
+            fontWeight: FontWeight.w300,
+          ),
+        ),
+        const Spacer(),
+        GestureDetector(
+          onTap: onShare,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(Icons.ios_share_outlined, color: cs.onSurface, size: 22),
+          ),
+        ),
+        const SizedBox(width: 8),
+        GestureDetector(
+          onTap: onDelete,
+          behavior: HitTestBehavior.opaque,
+          child: const Padding(
+            padding: EdgeInsets.all(8),
+            child: Icon(Icons.delete_outline, color: Colors.redAccent, size: 22),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 // ─── Tile ─────────────────────────────────────────────────────────────────────
 
 class _SightingTile extends StatefulWidget {
   final Sighting sighting;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
+  final VoidCallback onLongPress;
+  final bool selected;
+  final bool selectionMode;
 
   const _SightingTile({
     required this.sighting,
     required this.onTap,
-    required this.onDelete,
+    required this.onLongPress,
+    required this.selected,
+    required this.selectionMode,
   });
 
   @override
@@ -326,48 +400,48 @@ class _SightingTile extends StatefulWidget {
 }
 
 class _SightingTileState extends State<_SightingTile> {
-  bool _showOriginal = false;
-
   @override
   Widget build(BuildContext context) {
-    final path = _showOriginal
-        ? widget.sighting.originalPath
-        : widget.sighting.annotatedPath;
-
+    final cs = Theme.of(context).colorScheme;
     return Container(
       decoration: BoxDecoration(
-        border: Border.all(color: Colors.white.withAlpha(30), width: 0.5),
+        border: Border.all(color: cs.onSurface.withAlpha(30), width: 0.5),
       ),
       child: ClipRect(
         child: GestureDetector(
-          onLongPressStart: (_) => setState(() => _showOriginal = true),
-          onLongPressEnd: (_) => setState(() => _showOriginal = false),
-          onLongPressCancel: () => setState(() => _showOriginal = false),
+          onLongPress: widget.selectionMode ? null : widget.onLongPress,
           onTap: widget.onTap,
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Image.file(
-                File(path),
-                key: ValueKey(path),
+              Image(
+                image: widget.sighting.thumbnailProvider,
+                key: ValueKey(widget.sighting.id),
                 fit: BoxFit.cover,
                 width: double.infinity,
                 height: double.infinity,
-              ),
-              if (_showOriginal)
-                Positioned(
-                  top: 8, left: 8,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withAlpha(160),
-                      borderRadius: BorderRadius.circular(8),
+                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                  if (wasSynchronouslyLoaded || frame != null) return child;
+                  return Container(
+                    color: cs.onSurface.withAlpha(10),
+                    child: Center(
+                      child: SizedBox(
+                        width: 16, height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: cs.onSurface.withAlpha(60),
+                        ),
+                      ),
                     ),
-                    child: const Text('original',
-                        style: TextStyle(color: Colors.white, fontSize: 11)),
-                  ),
+                  );
+                },
+                errorBuilder: (_, __, ___) => Container(
+                  color: cs.onSurface.withAlpha(10),
+                  child: Icon(Icons.broken_image_outlined,
+                      color: cs.onSurface.withAlpha(40), size: 24),
                 ),
-              // Sync status badge
+              ),
+              // Sync status badge (stays hardcoded — overlaid on photo)
               if (widget.sighting.syncStatus != SyncStatus.synced)
                 Positioned(
                   bottom: 6, right: 6,
@@ -387,6 +461,27 @@ class _SightingTileState extends State<_SightingTile> {
                           size: 14,
                         ),
                 ),
+              // Selection indicator (stays hardcoded — overlaid on photo)
+              if (widget.selectionMode)
+                Positioned(
+                  top: 6, right: 6,
+                  child: Container(
+                    width: 24, height: 24,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.selected
+                          ? Colors.white
+                          : Colors.black.withAlpha(100),
+                      border: Border.all(
+                        color: Colors.white.withAlpha(widget.selected ? 255 : 120),
+                        width: 2,
+                      ),
+                    ),
+                    child: widget.selected
+                        ? const Icon(Icons.check, color: Colors.black, size: 16)
+                        : null,
+                  ),
+                ),
             ],
           ),
         ),
@@ -395,413 +490,14 @@ class _SightingTileState extends State<_SightingTile> {
   }
 }
 
-// ─── Detail screen ────────────────────────────────────────────────────────────
-
-class _DetailScreen extends StatefulWidget {
-  final List<Sighting> sightings;
-  final int initialIndex;
-
-  const _DetailScreen({
-    required this.sightings,
-    required this.initialIndex,
-  });
-
-  @override
-  State<_DetailScreen> createState() => _DetailScreenState();
-}
-
-class _DetailScreenState extends State<_DetailScreen> {
-  late final PageController _pageController;
-  late int _currentIndex;
-
-  bool _pressing = false;
-  bool _lockedOriginal = _globalLockedOriginal;
-
-  final Map<String, int> _versions = {};
-
-  Sighting get _current => widget.sightings[_currentIndex];
-
-  @override
-  void initState() {
-    super.initState();
-    _currentIndex = widget.initialIndex;
-    _pageController = PageController(initialPage: widget.initialIndex);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _precache(_currentIndex));
-  }
-
-  /// Loads original images for the current page ± 2 into Flutter's image cache
-  /// so swiping shows them instantly without a black flash.
-  void _precache(int center) {
-    for (int offset = -2; offset <= 2; offset++) {
-      final i = center + offset;
-      if (i >= 0 && i < widget.sightings.length && mounted) {
-        precacheImage(
-          FileImage(File(widget.sightings[i].originalPath)), context);
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
-
-  void _onPageChanged(int i) {
-    setState(() {
-      _currentIndex = i;
-      _pressing = false;
-    });
-    _precache(i);
-  }
-
-  Future<void> _openEditor() async {
-    final sighting = _current;
-    final result = await Navigator.push<Sighting>(
-      context,
-      _fadeScaleRoute(EditorScreen(
-        imagePath: sighting.annotatedPath,
-        sightingToUpdate: sighting,
-      )),
-    );
-    if (result != null && mounted) {
-      PaintingBinding.instance.imageCache
-          .evict(FileImage(File(sighting.annotatedPath)));
-      setState(() {
-        _versions[sighting.id] = (_versions[sighting.id] ?? 0) + 1;
-      });
-    }
-  }
-
-  Future<void> _saveToGallery() async {
-    try {
-      await Gal.putImage(_current.annotatedPath);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Saved to gallery'),
-            duration: Duration(seconds: 2),
-            backgroundColor: Colors.white24,
-          ),
-        );
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not save'),
-            duration: Duration(seconds: 2),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _share() async {
-    await Share.shareXFiles([XFile(_current.annotatedPath)]);
-  }
-
-  Future<void> _deleteSighting() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('Delete sighting?',
-            style: TextStyle(color: Colors.white)),
-        content: const Text('This cannot be undone.',
-            style: TextStyle(color: Colors.white70)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Colors.white54)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete',
-                style: TextStyle(color: Colors.redAccent)),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    final sighting = _current;
-    await SightingStorage.delete(sighting.id);
-    CloudService.deleteSighting(sighting.id); // fire and forget
-    if (mounted) Navigator.pop(context, true); // true = deleted, triggers gallery reload
-  }
-
-  void _showMenu() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: 16),
-            ListTile(
-              leading: const Icon(Icons.edit_outlined, color: Colors.white),
-              title: const Text('Edit', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _openEditor(); },
-            ),
-            ListTile(
-              leading: const Icon(Icons.ios_share_outlined, color: Colors.white),
-              title: const Text('Share', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _share(); },
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              title: const Text('Delete',
-                  style: TextStyle(color: Colors.redAccent)),
-              onTap: () { Navigator.pop(context); _deleteSighting(); },
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // true when the original photo is currently visible on screen
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onVerticalDragEnd: (details) {
-          if ((details.primaryVelocity ?? 0) > 500) {
-            Navigator.pop(context);
-          }
-        },
-        child: Stack(
-          children: [
-            // ── Images + tap gestures ──
-            GestureDetector(
-              // Hold to peek original / annotated
-              onLongPressStart:  (_) => setState(() => _pressing = true),
-              onLongPressEnd:    (_) => setState(() => _pressing = false),
-              onLongPressCancel: ()  => setState(() => _pressing = false),
-              // Double-tap to lock current mode
-              onDoubleTap: () => setState(() {
-                _lockedOriginal = !_lockedOriginal;
-                _globalLockedOriginal = _lockedOriginal;
-              }),
-              child: PageView.builder(
-                controller: _pageController,
-                itemCount: widget.sightings.length,
-                onPageChanged: _onPageChanged,
-                itemBuilder: (context, i) => _DetailPage(
-                  key: ValueKey(widget.sightings[i].id),
-                  sighting: widget.sightings[i],
-                  showOriginal: _lockedOriginal
-                      ? (i == _currentIndex ? !_pressing : true)
-                      : (i == _currentIndex ? _pressing : false),
-                  version: _versions[widget.sightings[i].id] ?? 0,
-                ),
-              ),
-            ),
-
-            // ── Top gradient ──
-            Positioned(
-              top: 0, left: 0, right: 0,
-              child: IgnorePointer(
-                child: Container(
-                  height: 120,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0xCC000000), Colors.transparent],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // ── Bottom gradient ──
-            Positioned(
-              bottom: 0, left: 0, right: 0,
-              child: IgnorePointer(
-                child: Container(
-                  height: 160,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.bottomCenter,
-                      end: Alignment.topCenter,
-                      colors: [Color(0xCC000000), Colors.transparent],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // ── Top bar: back button (left) ──
-            Positioned(
-              top: 0, left: 0, right: 0,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _OverlayBtn(
-                      icon: Icons.arrow_back,
-                      onTap: () => Navigator.pop(context),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // ── Bottom bar: hamburger menu (left) ──
-            Positioned(
-              bottom: 0, left: 0, right: 0,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _OverlayBtn(icon: Icons.menu, onTap: _showMenu),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Single page: only images ─────────────────────────────────────────────────
-
-class _DetailPage extends StatelessWidget {
-  final Sighting sighting;
-  final bool showOriginal;
-  final int version;
-
-  const _DetailPage({
-    required super.key,
-    required this.sighting,
-    required this.showOriginal,
-    required this.version,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Image.file(
-            File(sighting.originalPath),
-            key: ValueKey('orig-${sighting.id}'),
-            fit: BoxFit.contain,
-          ),
-        ),
-        Positioned.fill(
-          child: AnimatedOpacity(
-            opacity: showOriginal ? 0.0 : 1.0,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            child: Image.file(
-              File(sighting.annotatedPath),
-              key: ValueKey('ann-${sighting.id}-$version'),
-              fit: BoxFit.contain,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ─── Overlay button (back / menu) ─────────────────────────────────────────────
-
-class _OverlayBtn extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _OverlayBtn({required this.icon, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 44, height: 44,
-        decoration: BoxDecoration(
-          color: Colors.white.withAlpha(25),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Icon(icon, color: Colors.white, size: 22),
-      ),
-    );
-  }
-}
-
-// ─── Account avatar (header) ──────────────────────────────────────────────────
-
-class _AccountAvatar extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final avatarUrl = AuthService.avatarUrl;
-    final name = AuthService.displayName;
-    final isAnon = AuthService.isAnonymous;
-
-    return Container(
-      width: 32, height: 32,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.white.withAlpha(20),
-        border: Border.all(color: Colors.white.withAlpha(40), width: 1),
-      ),
-      child: ClipOval(
-        child: avatarUrl != null
-            ? Image.network(avatarUrl, fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => _anonIcon(name, isAnon))
-            : _anonIcon(name, isAnon),
-      ),
-    );
-  }
-
-  Widget _anonIcon(String? name, bool isAnon) {
-    if (!isAnon && name != null && name.isNotEmpty) {
-      return Center(
-        child: Text(
-          name[0].toUpperCase(),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.w300,
-          ),
-        ),
-      );
-    }
-    return const Icon(Icons.person_outline, color: Colors.white54, size: 18);
-  }
-}
-
 // ─── Empty state ──────────────────────────────────────────────────────────────
 
 class _EmptyState extends StatelessWidget {
-  final VoidCallback onAdd;
-  const _EmptyState({required this.onAdd});
+  const _EmptyState();
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -809,7 +505,7 @@ class _EmptyState extends StatelessWidget {
           Text(
             'Nothing yet',
             style: TextStyle(
-              color: Colors.white.withAlpha(100),
+              color: cs.onSurface.withAlpha(100),
               fontSize: 18,
               fontWeight: FontWeight.w300,
             ),
@@ -819,24 +515,9 @@ class _EmptyState extends StatelessWidget {
             'Photograph something and\nreveal what you see',
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: Colors.white.withAlpha(60),
+              color: cs.onSurface.withAlpha(60),
               fontSize: 14,
               height: 1.5,
-            ),
-          ),
-          const SizedBox(height: 32),
-          GestureDetector(
-            onTap: onAdd,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white.withAlpha(60)),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Text(
-                'Create first sighting',
-                style: TextStyle(color: Colors.white, fontSize: 15),
-              ),
             ),
           ),
         ],

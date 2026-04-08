@@ -44,6 +44,19 @@ class SightingStorage {
     await prefs.setStringList(_key, raw);
   }
 
+  /// Resets all sightings to [SyncStatus.local] so they get re-uploaded
+  /// under the current user (e.g. after switching from anon to Google).
+  static Future<void> markAllLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList(_key) ?? [];
+    final updated = raw.map((s) {
+      final map = jsonDecode(s) as Map<String, dynamic>;
+      map['syncStatus'] = SyncStatus.local.name;
+      return jsonEncode(map);
+    }).toList();
+    await prefs.setStringList(_key, updated);
+  }
+
   static Future<void> deleteAll() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_key);

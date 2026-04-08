@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show VoidCallback;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/sighting.dart';
 import 'device_info_service.dart';
@@ -78,21 +79,27 @@ class CloudService {
       final uid = userId;
       if (uid == null) return null;
 
-      // Get presigned URLs for both files in a single Edge Function call
+      // Get presigned URLs for all files in a single Edge Function call
       final urls = await _presignedPuts(sighting.id);
       if (urls == null) return null;
-      final origUrl = urls['original']!;
-      final annUrl  = urls['annotated']!;
+      final origUrl  = urls['original']!;
+      final annUrl   = urls['annotated']!;
+      final thumbUrl = urls['thumbnail']!;
 
-      // Upload both files to R2 in parallel
-      await Future.wait([
+      // Upload files to R2 in parallel
+      final uploads = <Future>[
         _putFile(origUrl['uploadUrl']!, File(sighting.originalPath), 'image/jpeg'),
         _putFile(annUrl['uploadUrl']!,  File(sighting.annotatedPath), 'image/png'),
-      ]);
+      ];
+      if (sighting.thumbnailPath.isNotEmpty && File(sighting.thumbnailPath).existsSync()) {
+        uploads.add(_putFile(thumbUrl['uploadUrl']!, File(sighting.thumbnailPath), 'image/png'));
+      }
+      await Future.wait(uploads);
 
       final updated = sighting.copyWith(
         originalUrl: origUrl['publicUrl'],
         annotatedUrl: annUrl['publicUrl'],
+        thumbnailUrl: thumbUrl['publicUrl'],
         syncStatus: SyncStatus.synced,
       );
 
@@ -151,11 +158,33 @@ class CloudService {
     } catch (_) {}
   }
 
+  /// Updates specific fields on a sighting (e.g. isFavorite, isPublic).
+  static Future<void> updateSightingFields(
+    String id, {
+    bool? isFavorite,
+    bool? isPublic,
+  }) async {
+    try {
+      await ensureSignedIn();
+      final fields = <String, dynamic>{};
+      if (isFavorite != null) fields['is_favorite'] = isFavorite;
+      if (isPublic != null) fields['is_public'] = isPublic;
+      if (fields.isEmpty) return;
+      await _db.from('sightings').update(fields).eq('id', id);
+    } catch (_) {}
+  }
+
   // ── Download from cloud ───────────────────────────────────────────────────
 
   /// Downloads remote sightings that aren't on this device yet.
   /// Returns the number of newly downloaded sightings.
-  static Future<int> downloadFromCloud() async {
+  /// Downloads remote sightings that aren't on this device yet.
+  /// Phase 1: saves metadata immediately (with URLs, no local files) so the
+  ///          gallery can show network images right away.
+  /// Phase 2: downloads files in background and updates local paths.
+  /// [onProgress] is called after each file pair is downloaded so the UI can
+  /// refresh incrementally.
+  static Future<int> downloadFromCloud({VoidCallback? onProgress}) async {
     try {
       await ensureSignedIn();
       final remote = await fetchRemoteSightings();
@@ -169,31 +198,44 @@ class CloudService {
           .toList();
       if (toDownload.isEmpty) return 0;
 
-      int count = 0;
-      for (final remote in toDownload) {
-        try {
-          final dir = await SightingStorage.sightingDir(remote.id);
-          final origPath = '$dir/original.jpg';
-          final annPath  = '$dir/annotated.png';
-          await Future.wait([
-            _downloadFile(remote.originalUrl!, origPath),
-            _downloadFile(remote.annotatedUrl!, annPath),
-          ]);
-          await SightingStorage.save(Sighting(
-            id:           remote.id,
-            createdAt:    remote.createdAt,
-            originalPath: origPath,
-            annotatedPath: annPath,
-            originalUrl:  remote.originalUrl,
-            annotatedUrl: remote.annotatedUrl,
-            syncStatus:   SyncStatus.synced,
-          ));
-          count++;
-        } catch (_) {
-          // Skip sightings that fail to download
-        }
+      // Phase 1: save metadata immediately so gallery shows network images
+      for (final s in toDownload) {
+        await SightingStorage.save(s); // has URLs, empty paths
       }
-      return count;
+      onProgress?.call();
+
+      // Phase 2: download files and update with local paths
+      for (final s in toDownload) {
+        try {
+          final dir = await SightingStorage.sightingDir(s.id);
+          final origPath  = '$dir/original.jpg';
+          final annPath   = '$dir/annotated.png';
+          final thumbPath = '$dir/thumbnail.jpg';
+          final downloads = <Future>[
+            _downloadFile(s.originalUrl!, origPath),
+            _downloadFile(s.annotatedUrl!, annPath),
+          ];
+          if (s.thumbnailUrl != null && s.thumbnailUrl!.isNotEmpty) {
+            downloads.add(_downloadFile(s.thumbnailUrl!, thumbPath));
+          }
+          await Future.wait(downloads);
+          await SightingStorage.save(Sighting(
+            id:            s.id,
+            createdAt:     s.createdAt,
+            originalPath:  origPath,
+            annotatedPath: annPath,
+            thumbnailPath: thumbPath,
+            originalUrl:   s.originalUrl,
+            annotatedUrl:  s.annotatedUrl,
+            thumbnailUrl:  s.thumbnailUrl,
+            syncStatus:    SyncStatus.synced,
+            isFavorite:    s.isFavorite,
+            isPublic:      s.isPublic,
+          ));
+          onProgress?.call();
+        } catch (_) {}
+      }
+      return toDownload.length;
     } catch (_) {
       return 0;
     }
@@ -215,7 +257,7 @@ class CloudService {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  /// Returns { 'original': {uploadUrl, publicUrl}, 'annotated': {uploadUrl, publicUrl} }
+  /// Returns { 'original': {uploadUrl, publicUrl}, 'annotated': ..., 'thumbnail': ... }
   static Future<Map<String, Map<String, String>>?> _presignedPuts(
       String sightingId) async {
     try {
@@ -229,8 +271,9 @@ class CloudService {
         return {'uploadUrl': m['uploadUrl'] as String, 'publicUrl': m['publicUrl'] as String};
       }
       return {
-        'original': parse(data['original']),
+        'original':  parse(data['original']),
         'annotated': parse(data['annotated']),
+        'thumbnail': parse(data['thumbnail']),
       };
     } catch (_) {
       return null;

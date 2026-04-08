@@ -82,6 +82,7 @@ class AuthService {
 
     if (anonId != null && !isAnonymous) {
       await _migrateAnonData(anonId);
+      await SightingStorage.markAllLocal();
     }
     await CloudService.syncProfile();
     return true;
@@ -91,6 +92,16 @@ class AuthService {
 
   /// Signs out, clears local sightings, and creates a new anonymous session.
   static Future<void> signOut() async {
+    await SightingStorage.deleteAll();
+    try { await GoogleSignIn.instance.signOut(); } catch (_) {}
+    await _db.auth.signOut();
+    await CloudService.ensureSignedIn();
+  }
+
+  // ── Delete account ─────────────────────────────────────────────────────────
+
+  /// Clears local data and signs out. Full Supabase user deletion is a backend task.
+  static Future<void> deleteAccount() async {
     await SightingStorage.deleteAll();
     try { await GoogleSignIn.instance.signOut(); } catch (_) {}
     await _db.auth.signOut();
