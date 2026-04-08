@@ -41,10 +41,22 @@ class AccountScreenState extends State<AccountScreen> {
   Future<void> _signInWithGoogle() async {
     setState(() => _loading = true);
     try {
-      final success = await AuthService.signInWithGoogle();
-      if (mounted && success) {
-        widget.onAuthChanged?.call();
-        _loadInfo();
+      final result = await AuthService.signInWithGoogle();
+      if (!mounted) return;
+
+      switch (result) {
+        case SignInResult.cancelled:
+          break;
+        case SignInResult.newAccount:
+          widget.onAuthChanged?.call();
+          _loadInfo();
+        case SignInResult.existingAccount:
+          final transfer = await _showMergeDialog();
+          await AuthService.completeMerge(transferSightings: transfer);
+          if (mounted) {
+            widget.onAuthChanged?.call();
+            _loadInfo();
+          }
       }
     } catch (e) {
       if (mounted) {
@@ -58,6 +70,36 @@ class AccountScreenState extends State<AccountScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<bool> _showMergeDialog() async {
+    final cs = Theme.of(context).colorScheme;
+    final transfer = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: Text('Transfer photos?',
+            style: TextStyle(color: cs.onSurface)),
+        content: Text(
+          'You already have photos on this account. '
+          'Would you like to transfer your anonymous photos as well?',
+          style: TextStyle(color: cs.onSurface.withAlpha(180)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('No, skip',
+                style: TextStyle(color: cs.onSurface.withAlpha(140))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Transfer',
+                style: TextStyle(color: cs.primary)),
+          ),
+        ],
+      ),
+    );
+    return transfer ?? false;
   }
 
   Future<void> _signOut() async {

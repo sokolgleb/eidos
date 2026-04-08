@@ -6,6 +6,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'cloud_service.dart';
 import 'sighting_storage.dart';
 
+enum SignInResult { cancelled, newAccount, existingAccount }
+
 class AuthService {
   static const _iosClientId =
       '407860456187-ntdr7bkdepdrtvnlq0r1mt23sehd6nv3.apps.googleusercontent.com';
@@ -57,18 +59,27 @@ class AuthService {
     return sha256.convert(utf8.encode(input)).toString();
   }
 
+  // ── Pending anon merge ──────────────────────────────────────────────────────
+  // Stored between signInWithGoogle() and completeMerge() when the OAuth account
+  // already has sightings — the UI shows a merge dialog before deciding.
+
+  static String? _pendingAnonId;
+
   // ── Sign in ────────────────────────────────────────────────────────────────
 
-  /// Native Google Sign In. Returns false if user cancelled, true on success.
-  static Future<bool> signInWithGoogle() async {
+  /// Native Google Sign In. Returns a [SignInResult] indicating outcome.
+  static Future<SignInResult> signInWithGoogle() async {
     final anonId = currentUser?.id;
+    // Count local sightings BEFORE switching session — if anon has 0 photos,
+    // there's nothing to merge and the merge dialog should not appear.
+    final anonLocalCount = (await SightingStorage.loadAll()).length;
     await _ensureGSIInitialized();
 
     final GoogleSignInAccount account;
     try {
       account = await GoogleSignIn.instance.authenticate();
     } catch (_) {
-      return false; // cancelled or unavailable
+      return SignInResult.cancelled;
     }
 
     final idToken = account.authentication.idToken;
@@ -80,12 +91,45 @@ class AuthService {
       nonce: _rawNonce,
     );
 
+    // Re-activate profile if it was previously soft-deleted
+    try {
+      await _db.rpc('reactivate_own_profile');
+    } catch (_) {}
+
     if (anonId != null && !isAnonymous) {
-      await _migrateAnonData(anonId);
-      await SightingStorage.markAllLocal();
+      // Only check for merge conflict if the anon account actually has photos
+      if (anonLocalCount > 0) {
+        try {
+          final state = await _db.rpc('get_own_profile_state') as Map<String, dynamic>;
+          final oauthSightingCount = (state['sighting_count'] as num?)?.toInt() ?? 0;
+
+          if (oauthSightingCount > 0) {
+            // Both accounts have sightings → ask user via merge dialog
+            _pendingAnonId = anonId;
+            await CloudService.syncProfile();
+            return SignInResult.existingAccount;
+          }
+        } catch (_) {}
+      }
+
+      // Either anon has no photos, or OAuth account is fresh → auto-transfer.
+      // Don't markAllLocal: already-synced sightings stay at their R2 paths
+      // (under anon_id/) and the URLs in the DB still work. Only truly unsynced
+      // local sightings will be uploaded under the new user_id by _syncUnsynced.
+      await _migrateAnonData(anonId, transferSightings: true);
     }
+
     await CloudService.syncProfile();
-    return true;
+    return SignInResult.newAccount;
+  }
+
+  /// Completes the anon→OAuth merge after user chooses in the merge dialog.
+  static Future<void> completeMerge({required bool transferSightings}) async {
+    final anonId = _pendingAnonId;
+    _pendingAnonId = null;
+    if (anonId == null) return;
+
+    await _migrateAnonData(anonId, transferSightings: transferSightings);
   }
 
   // ── Sign out ───────────────────────────────────────────────────────────────
@@ -100,8 +144,13 @@ class AuthService {
 
   // ── Delete account ─────────────────────────────────────────────────────────
 
-  /// Clears local data and signs out. Full Supabase user deletion is a backend task.
+  /// Soft-deletes server data, clears local data, and signs out.
   static Future<void> deleteAccount() async {
+    try {
+      await _db.rpc('delete_own_account');
+    } catch (_) {
+      // Non-fatal — proceed with local cleanup even if server call fails
+    }
     await SightingStorage.deleteAll();
     try { await GoogleSignIn.instance.signOut(); } catch (_) {}
     await _db.auth.signOut();
@@ -110,9 +159,15 @@ class AuthService {
 
   // ── Migration ──────────────────────────────────────────────────────────────
 
-  static Future<void> _migrateAnonData(String anonId) async {
+  static Future<void> _migrateAnonData(
+    String anonId, {
+    bool transferSightings = true,
+  }) async {
     try {
-      await _db.rpc('migrate_anon_to_auth', params: {'anon_id': anonId});
+      await _db.rpc('migrate_anon_to_auth', params: {
+        'anon_id': anonId,
+        'transfer_sightings': transferSightings,
+      });
     } catch (_) {
       // Non-fatal
     }

@@ -555,6 +555,9 @@ class _IconBtn extends StatelessWidget {
               ? Colors.white.withAlpha(60)
               : Colors.white.withAlpha(25),
           borderRadius: BorderRadius.circular(12),
+          boxShadow: const [
+            BoxShadow(color: Color(0x44000000), blurRadius: 8, spreadRadius: 1),
+          ],
         ),
         child: Icon(
           icon,
